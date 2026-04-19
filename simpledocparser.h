@@ -3,6 +3,7 @@
 
 #include <QObject>
 #include <QString>
+#include <QList>
 
 class SimpleDocParser : public QObject
 {
@@ -15,6 +16,19 @@ public:
     bool build(const QString &translatedText, const QString &outputPath);
 
 private:
+    struct TextRun {
+        QString text;
+        bool bold = false;
+        bool italic = false;
+        bool underline = false;
+        bool isHeading = false;
+        int headingLevel = 0;
+        bool isTable = false;
+        int tableCols = 0;
+    };
+
+    QList<TextRun> m_runs;
+
     bool parseTXT(const QString &filePath, QString &outText);
     bool parseDOCX(const QString &filePath, QString &outText);
     bool parsePDF(const QString &filePath, QString &outText);
@@ -22,6 +36,8 @@ private:
     bool buildTXT(const QString &translatedText, const QString &outputPath);
     bool buildDOCX(const QString &translatedText, const QString &outputPath);
     bool buildPDF(const QString &translatedText, const QString &outputPath);
+
+    QStringList distributeLines(const QStringList &lines, int targetCount);
 };
 
 #endif
