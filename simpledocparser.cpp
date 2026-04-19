@@ -47,6 +47,7 @@ bool SimpleDocParser::parseDOCX(const QString &filePath, QString &outText)
 
     QProcess process;
 
+    // 🔥 ИСПРАВЛЕНИЕ: Группируем runs по параграфам сразу в Python
     QString script =
         "import json\n"
         "import docx\n"
@@ -75,7 +76,7 @@ bool SimpleDocParser::parseDOCX(const QString &filePath, QString &outText)
         "    return 0\n"
         "\n"
         "doc = docx.Document(r'''" + filePath + "''')\n"
-                     "runs_data = []\n"
+                     "blocks_data = []  # Каждый элемент = параграф или таблица\n"
                      "texts = []\n"
                      "\n"
                      "for block in iter_block_items(doc):\n"
@@ -88,66 +89,75 @@ bool SimpleDocParser::parseDOCX(const QString &filePath, QString &outText)
                      "        heading_level = get_heading_level(block)\n"
                      "        is_heading = heading_level > 0\n"
                      "        \n"
-                     "        # Каждый run — отдельная строка с форматированием\n"
+                     "        # Собираем runs параграфа\n"
                      "        para_runs = []\n"
                      "        for run in block.runs:\n"
                      "            text = run.text\n"
                      "            if not text:\n"
                      "                continue\n"
                      "            \n"
-                     "            # Определяем форматирование run\n"
                      "            bold = bool(run.bold) if run.bold is not None else False\n"
                      "            italic = bool(run.italic) if run.italic is not None else False\n"
                      "            underline = bool(run.underline) if run.underline is not None else False\n"
                      "            \n"
-                     "            run_data = {\n"
+                     "            para_runs.append({\n"
                      "                'text': text,\n"
                      "                'bold': bold,\n"
                      "                'italic': italic,\n"
-                     "                'underline': underline,\n"
-                     "                'headingLevel': heading_level,\n"
-                     "                'isHeading': is_heading\n"
-                     "            }\n"
-                     "            para_runs.append(run_data)\n"
-                     "            runs_data.append(run_data)\n"
+                     "                'underline': underline\n"
+                     "            })\n"
                      "        \n"
-                     "        if para_runs:\n"
-                     "            # Собираем текст параграфа из runs\n"
-                     "            para_full_text = ''.join([r['text'] for r in para_runs])\n"
-                     "            texts.append(para_full_text)\n"
-                     "        else:\n"
-                     "            # Fallback\n"
-                     "            run_data = {\n"
-                     "                'text': block.text,\n"
+                     "        # Определяем стили параграфа (если хоть один run имеет стиль)\n"
+                     "        has_bold = any(r['bold'] for r in para_runs)\n"
+                     "        has_italic = any(r['italic'] for r in para_runs)\n"
+                     "        has_underline = any(r['underline'] for r in para_runs)\n"
+                     "        \n"
+                     "        block_data = {\n"
+                     "            'type': 'paragraph',\n"
+                     "            'text': block.text,\n"
+                     "            'bold': has_bold,\n"
+                     "            'italic': has_italic,\n"
+                     "            'underline': has_underline,\n"
+                     "            'headingLevel': heading_level,\n"
+                     "            'isHeading': is_heading\n"
+                     "        }\n"
+                     "        blocks_data.append(block_data)\n"
+                     "        texts.append(block.text)\n"
+                     "            \n"
+                     "    elif isinstance(block, Table):\n"
+                     "        table_data = []\n"
+                     "        max_cols = 0\n"
+                     "        \n"
+                     "        for row in block.rows:\n"
+                     "            row_data = []\n"
+                     "            for cell in row.cells:\n"
+                     "                cell_text = cell.text.strip()\n"
+                     "                row_data.append(cell_text)\n"
+                     "            if row_data:\n"
+                     "                table_data.append(row_data)\n"
+                     "                max_cols = max(max_cols, len(row_data))\n"
+                     "        \n"
+                     "        if table_data:\n"
+                     "            block_data = {\n"
+                     "                'type': 'table',\n"
+                     "                'text': json.dumps(table_data, ensure_ascii=False),\n"
                      "                'bold': False,\n"
                      "                'italic': False,\n"
                      "                'underline': False,\n"
-                     "                'headingLevel': heading_level,\n"
-                     "                'isHeading': is_heading\n"
+                     "                'headingLevel': 0,\n"
+                     "                'isHeading': False,\n"
+                     "                'tableCols': max_cols,\n"
+                     "                'tableRows': len(table_data)\n"
                      "            }\n"
-                     "            runs_data.append(run_data)\n"
-                     "            texts.append(block.text)\n"
+                     "            blocks_data.append(block_data)\n"
                      "            \n"
-                     "    elif isinstance(block, Table):\n"
-                     "        for row in block.rows:\n"
-                     "            row_text = []\n"
-                     "            for cell in row.cells:\n"
-                     "                cell_text = cell.text.strip()\n"
-                     "                if cell_text:\n"
-                     "                    row_text.append(cell_text)\n"
-                     "                    runs_data.append({\n"
-                     "                        'text': cell_text,\n"
-                     "                        'bold': False,\n"
-                     "                        'italic': False,\n"
-                     "                        'underline': False,\n"
-                     "                        'headingLevel': 0,\n"
-                     "                        'isHeading': False\n"
-                     "                    })\n"
-                     "            if row_text:\n"
-                     "                texts.append(' | '.join(row_text))\n"
+                     "            table_text = []\n"
+                     "            for row in table_data:\n"
+                     "                table_text.append(' | '.join(row))\n"
+                     "            texts.append('\\n'.join(table_text))\n"
                      "\n"
                      "print('###JSON###')\n"
-                     "print(json.dumps(runs_data, ensure_ascii=False))\n"
+                     "print(json.dumps(blocks_data, ensure_ascii=False))\n"
                      "print('###TEXT###')\n"
                      "print('\\n'.join(texts))\n";
 
@@ -167,6 +177,7 @@ bool SimpleDocParser::parseDOCX(const QString &filePath, QString &outText)
 
     outText = textPart;
 
+    // 🔥 ИСПРАВЛЕНИЕ: Каждый block = один run
     QJsonDocument doc = QJsonDocument::fromJson(jsonPart.toUtf8());
     QJsonArray arr = doc.array();
 
@@ -180,6 +191,8 @@ bool SimpleDocParser::parseDOCX(const QString &filePath, QString &outText)
         r.underline = obj["underline"].toBool();
         r.isHeading = obj["isHeading"].toBool();
         r.headingLevel = obj["headingLevel"].toInt();
+        r.isTable = (obj["type"].toString() == "table");
+        r.tableCols = obj["tableCols"].toInt();
 
         m_runs.append(r);
     }
@@ -225,6 +238,7 @@ bool SimpleDocParser::buildTXT(const QString &text, const QString &path)
 
 bool SimpleDocParser::buildDOCX(const QString &translatedText, const QString &path)
 {
+    // Нормализация текста
     QString normalizedText = translatedText;
     normalizedText.replace("\r\n", "\n");
     normalizedText.replace("\r", "\n");
@@ -244,36 +258,103 @@ bool SimpleDocParser::buildDOCX(const QString &translatedText, const QString &pa
 
     qDebug() << "translatedLines:" << lines.size() << "m_runs:" << m_runs.size();
 
-    QStringList translatedParts;
+    // 🔥 Разделяем на текст и таблицы
+    QStringList textLines;
+    QStringList tableLines;
 
-    if (lines.size() == m_runs.size()) {
-        translatedParts = lines;
-    } else if (lines.size() > 0 && m_runs.size() > 0) {
-        translatedParts = distributeLines(lines, m_runs.size());
-    } else {
-        translatedParts = lines;
+    for (const QString &line : lines) {
+        if (line.contains(" | ")) {
+            tableLines.append(line);
+        } else {
+            textLines.append(line);
+        }
     }
 
-    qDebug() << "translatedParts:" << translatedParts.size();
+    qDebug() << "Text lines:" << textLines.size() << "Table lines:" << tableLines.size();
 
+    // 🔥 Собираем текстовые строки обратно в параграфы
+    // Считаем сколько текстовых runs (не таблиц)
+    int textRunsCount = 0;
+    for (const auto &run : m_runs) {
+        if (!run.isTable) textRunsCount++;
+    }
+
+    qDebug() << "Text runs count:" << textRunsCount;
+
+    // Распределяем текстовые строки по текстовым runs
+    QStringList distributedText;
+    if (textLines.size() == textRunsCount) {
+        distributedText = textLines;
+    } else if (textLines.size() > 0 && textRunsCount > 0) {
+        // Собираем весь текст и делим поровну
+        QString fullText = textLines.join(" ");
+        QStringList words = fullText.split(" ", Qt::SkipEmptyParts);
+
+        int wordsPerRun = words.size() / textRunsCount;
+        int remainder = words.size() % textRunsCount;
+
+        int wordIdx = 0;
+        for (int i = 0; i < textRunsCount; ++i) {
+            int count = wordsPerRun + (i < remainder ? 1 : 0);
+            QStringList runWords;
+            for (int j = 0; j < count && wordIdx < words.size(); ++j) {
+                runWords.append(words[wordIdx++]);
+            }
+            distributedText.append(runWords.join(" "));
+        }
+    }
+
+    // Формируем JSON
     QJsonArray arr;
+    int textIdx = 0;
+    int tableIdx = 0;
 
-    int minSize = qMin(translatedParts.size(), m_runs.size());
+    for (const auto &run : m_runs) {
+        if (run.isTable) {
+            // Таблица
+            QJsonObject obj;
+            obj["isTable"] = true;
+            obj["tableCols"] = run.tableCols;
 
-    for (int i = 0; i < minSize; ++i) {
-        QString cleanText = translatedParts[i];
-        cleanText.replace("\r", " ");
-        cleanText.replace("\n", " ");
-        cleanText = cleanText.simplified(); // Убирает лишние пробелы
+            // Парсим оригинальную структуру таблицы
+            QJsonDocument tableDoc = QJsonDocument::fromJson(run.text.toUtf8());
+            QJsonArray origTableData = tableDoc.array();
 
-        QJsonObject obj;
-        obj["text"] = cleanText;
-        obj["bold"] = m_runs[i].bold;
-        obj["italic"] = m_runs[i].italic;
-        obj["underline"] = m_runs[i].underline;
-        obj["heading"] = m_runs[i].isHeading;
-        obj["headingLevel"] = m_runs[i].headingLevel;
-        arr.append(obj);
+            // Собираем переведённые строки таблицы
+            QJsonArray translatedTableData;
+            int rowsNeeded = origTableData.size();
+
+            for (int r = 0; r < rowsNeeded && tableIdx < tableLines.size(); ++r) {
+                QString line = tableLines[tableIdx++];
+                QStringList cells = line.split("|", Qt::SkipEmptyParts);
+
+                QJsonArray rowArray;
+                for (const QString &cell : cells) {
+                    rowArray.append(cell.trimmed());
+                }
+                translatedTableData.append(rowArray);
+            }
+
+            obj["tableData"] = translatedTableData;
+            arr.append(obj);
+        } else {
+            // Обычный параграф — берём готовый текст
+            QString cleanText = (textIdx < distributedText.size())
+                                    ? distributedText[textIdx++]
+                                    : run.text;
+
+            cleanText = cleanText.simplified();
+
+            QJsonObject obj;
+            obj["text"] = cleanText;
+            obj["bold"] = run.bold;
+            obj["italic"] = run.italic;
+            obj["underline"] = run.underline;
+            obj["heading"] = run.isHeading;
+            obj["headingLevel"] = run.headingLevel;
+            obj["isTable"] = false;
+            arr.append(obj);
+        }
     }
 
     QJsonDocument doc(arr);
@@ -293,29 +374,45 @@ bool SimpleDocParser::buildDOCX(const QString &translatedText, const QString &pa
         "data = json.loads(r'''" + json + "''')\n"
                  "\n"
                  "for item in data:\n"
-                 "    text = item['text']\n"
-                 "    bold = item['bold']\n"
-                 "    italic = item['italic']\n"
-                 "    underline = item['underline']\n"
-                 "    isHeading = item['heading']\n"
-                 "    headingLevel = item.get('headingLevel', 1)\n"
-                 "\n"
-                 "    if not text and not isHeading:\n"
-                 "        doc.add_paragraph()\n"
-                 "        continue\n"
-                 "\n"
-                 "    if isHeading:\n"
-                 "        p = doc.add_heading(level=headingLevel)\n"
+                 "    is_table = item.get('isTable', False)\n"
+                 "    \n"
+                 "    if is_table:\n"
+                 "        table_data = item.get('tableData', [])\n"
+                 "        cols = item.get('tableCols', 1)\n"
+                 "        \n"
+                 "        if table_data:\n"
+                 "            rows = len(table_data)\n"
+                 "            table = doc.add_table(rows=rows, cols=cols)\n"
+                 "            table.style = 'Table Grid'\n"
+                 "            \n"
+                 "            for r in range(rows):\n"
+                 "                row_data = table_data[r]\n"
+                 "                for c in range(min(len(row_data), cols)):\n"
+                 "                    table.rows[r].cells[c].text = row_data[c]\n"
                  "    else:\n"
-                 "        p = doc.add_paragraph()\n"
-                 "\n"
-                 "    run = p.add_run(text)\n"
-                 "    if bold:\n"
-                 "        run.bold = True\n"
-                 "    if italic:\n"
-                 "        run.italic = True\n"
-                 "    if underline:\n"
-                 "        run.underline = True\n"
+                 "        text = item['text']\n"
+                 "        bold = item['bold']\n"
+                 "        italic = item['italic']\n"
+                 "        underline = item['underline']\n"
+                 "        isHeading = item['heading']\n"
+                 "        headingLevel = item.get('headingLevel', 1)\n"
+                 "        \n"
+                 "        if not text and not isHeading:\n"
+                 "            doc.add_paragraph()\n"
+                 "            continue\n"
+                 "        \n"
+                 "        if isHeading:\n"
+                 "            p = doc.add_heading(level=headingLevel)\n"
+                 "        else:\n"
+                 "            p = doc.add_paragraph()\n"
+                 "        \n"
+                 "        run = p.add_run(text)\n"
+                 "        if bold:\n"
+                 "            run.bold = True\n"
+                 "        if italic:\n"
+                 "            run.italic = True\n"
+                 "        if underline:\n"
+                 "            run.underline = True\n"
                  "\n"
                  "doc.save(r'''" + safePath + "''')\n"
                      "print('OK')\n";
@@ -330,57 +427,6 @@ bool SimpleDocParser::buildDOCX(const QString &translatedText, const QString &pa
     }
 
     return true;
-}
-
-QStringList SimpleDocParser::distributeLines(const QStringList &lines, int targetCount)
-{
-    QStringList result;
-
-    if (targetCount <= 0) return result;
-    if (lines.isEmpty()) return result;
-
-    QStringList normalizedLines;
-    for (const QString &line : lines) {
-        QString normalized = line;
-        normalized.replace("\r\n", " ");
-        normalized.replace("\r", " ");
-        normalized.replace("\n", " ");
-        normalized = normalized.simplified();
-        if (!normalized.isEmpty()) {
-            normalizedLines.append(normalized);
-        }
-    }
-
-    // Объединяем все строки в один текст
-    QString fullText = normalizedLines.join(" ");
-
-    // Разбиваем на слова
-    QStringList words = fullText.split(" ", Qt::SkipEmptyParts);
-
-    if (words.isEmpty()) {
-        for (int i = 0; i < targetCount; ++i) {
-            result.append("");
-        }
-        return result;
-    }
-
-    // Распределяем слова поровну
-    int wordsPerRun = words.size() / targetCount;
-    int remainder = words.size() % targetCount;
-
-    int wordIndex = 0;
-    for (int i = 0; i < targetCount; ++i) {
-        int count = wordsPerRun + (i < remainder ? 1 : 0);
-
-        QStringList runWords;
-        for (int j = 0; j < count && wordIndex < words.size(); ++j) {
-            runWords.append(words[wordIndex++]);
-        }
-
-        result.append(runWords.join(" "));
-    }
-
-    return result;
 }
 
 bool SimpleDocParser::buildPDF(const QString &text, const QString &path)
