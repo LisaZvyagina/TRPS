@@ -110,6 +110,45 @@ bool SimpleDocParser::parseDOCX(const QString &filePath, QString &outText)
         "    \n"
         "    return font_name, font_size_pt\n"
         "\n"
+        "def get_cell_info(cell):\n"
+        "    font_name = None\n"
+        "    font_size_pt = None\n"
+        "    bold = False\n"
+        "    italic = False\n"
+        "    underline = False\n"
+        "    alignment = ''\n"
+        "    \n"
+        "    for para in cell.paragraphs:\n"
+        "        # Берем выравнивание из первого параграфа ячейки\n"
+        "        if not alignment and para.alignment is not None:\n"
+        "            alignment_map = {\n"
+        "                0: 'left',\n"
+        "                1: 'center',\n"
+        "                2: 'right',\n"
+        "                3: 'justify'\n"
+        "            }\n"
+        "            alignment = alignment_map.get(para.alignment, '')\n"
+        "        \n"
+        "        for run in para.runs:\n"
+        "            if run.text.strip():\n"
+        "                fn, fs = get_font_info(run, para)\n"
+        "                if fn and not font_name:\n"
+        "                    font_name = fn\n"
+        "                if fs and not font_size_pt:\n"
+        "                    font_size_pt = fs\n"
+        "                if run.bold:\n"
+        "                    bold = True\n"
+        "                if run.italic:\n"
+        "                    italic = True\n"
+        "                if run.underline:\n"
+        "                    underline = True\n"
+        "                if font_name and font_size_pt and alignment:\n"
+        "                    break\n"
+        "        if font_name and font_size_pt and alignment:\n"
+        "            break\n"
+        "    \n"
+        "    return font_name, font_size_pt, bold, italic, underline, alignment\n"
+        "\n"
         "doc = docx.Document(r'''" + filePath + "''')\n"
                      "blocks_data = []\n"
                      "texts = []\n"
@@ -187,7 +226,16 @@ bool SimpleDocParser::parseDOCX(const QString &filePath, QString &outText)
                      "            row_data = []\n"
                      "            for cell in row.cells:\n"
                      "                cell_text = cell.text.strip()\n"
-                     "                row_data.append(cell_text)\n"
+                     "                fn, fs, bold, italic, underline, align = get_cell_info(cell)\n"
+                     "                row_data.append({\n"
+                     "                    'text': cell_text,\n"
+                     "                    'fontName': fn if fn else '',\n"
+                     "                    'fontSize': round(fs) if fs else 0,\n"
+                     "                    'bold': bold,\n"
+                     "                    'italic': italic,\n"
+                     "                    'underline': underline,\n"
+                     "                    'alignment': align\n"
+                     "                })\n"
                      "            if row_data:\n"
                      "                table_data.append(row_data)\n"
                      "                max_cols = max(max_cols, len(row_data))\n"
@@ -211,7 +259,7 @@ bool SimpleDocParser::parseDOCX(const QString &filePath, QString &outText)
                      "            \n"
                      "            table_text = []\n"
                      "            for row in table_data:\n"
-                     "                table_text.append(' | '.join(row))\n"
+                     "                table_text.append(' | '.join([cell['text'] for cell in row]))\n"
                      "            texts.append('\\n'.join(table_text))\n"
                      "\n"
                      "print('###JSON###')\n"
@@ -379,8 +427,26 @@ bool SimpleDocParser::buildDOCX(const QString &translatedText, const QString &pa
                 QStringList cells = line.split("|", Qt::SkipEmptyParts);
 
                 QJsonArray rowArray;
+                int cellIdx = 0;
                 for (const QString &cell : cells) {
-                    rowArray.append(cell.trimmed());
+                    QJsonObject cellObj;
+                    cellObj["text"] = cell.trimmed();
+
+                    if (r < origTableData.size()) {
+                        QJsonArray origRow = origTableData[r].toArray();
+                        if (cellIdx < origRow.size()) {
+                            QJsonObject origCell = origRow[cellIdx].toObject();
+                            cellObj["fontName"] = origCell["fontName"].toString();
+                            cellObj["fontSize"] = origCell["fontSize"].toInt();
+                            cellObj["bold"] = origCell["bold"].toBool();
+                            cellObj["italic"] = origCell["italic"].toBool();
+                            cellObj["underline"] = origCell["underline"].toBool();
+                            cellObj["alignment"] = origCell["alignment"].toString();
+                        }
+                    }
+
+                    rowArray.append(cellObj);
+                    cellIdx++;
                 }
                 translatedTableData.append(rowArray);
             }
@@ -442,7 +508,36 @@ bool SimpleDocParser::buildDOCX(const QString &translatedText, const QString &pa
                  "            for r in range(rows):\n"
                  "                row_data = table_data[r]\n"
                  "                for c in range(min(len(row_data), cols)):\n"
-                 "                    table.rows[r].cells[c].text = row_data[c]\n"
+                 "                    cell = table.rows[r].cells[c]\n"
+                 "                    cell_data = row_data[c]\n"
+                 "                    \n"
+                 "                    cell.text = ''\n"
+                 "                    p = cell.paragraphs[0]\n"
+                 "                    run = p.add_run(cell_data['text'])\n"
+                 "                    \n"
+                 "                    if cell_data.get('bold', False):\n"
+                 "                        run.bold = True\n"
+                 "                    if cell_data.get('italic', False):\n"
+                 "                        run.italic = True\n"
+                 "                    if cell_data.get('underline', False):\n"
+                 "                        run.underline = True\n"
+                 "                    \n"
+                 "                    font_name = cell_data.get('fontName', '')\n"
+                 "                    font_size = cell_data.get('fontSize', 0)\n"
+                 "                    if font_name:\n"
+                 "                        run.font.name = font_name\n"
+                 "                    if font_size > 0:\n"
+                 "                        run.font.size = Pt(font_size)\n"
+                 "                    \n"
+                 "                    alignment = cell_data.get('alignment', '')\n"
+                 "                    align_map = {\n"
+                 "                        'left': WD_ALIGN_PARAGRAPH.LEFT,\n"
+                 "                        'center': WD_ALIGN_PARAGRAPH.CENTER,\n"
+                 "                        'right': WD_ALIGN_PARAGRAPH.RIGHT,\n"
+                 "                        'justify': WD_ALIGN_PARAGRAPH.JUSTIFY\n"
+                 "                    }\n"
+                 "                    if alignment in align_map:\n"
+                 "                        p.alignment = align_map[alignment]\n"
                  "    else:\n"
                  "        text = item['text']\n"
                  "        bold = item['bold']\n"
