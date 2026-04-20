@@ -154,6 +154,16 @@ bool SimpleDocParser::parseDOCX(const QString &filePath, QString &outText)
                      "        has_italic = any(r['italic'] for r in para_runs)\n"
                      "        has_underline = any(r['underline'] for r in para_runs)\n"
                      "        \n"
+                     "        alignment = ''\n"
+                     "        if block.alignment is not None:\n"
+                     "            alignment_map = {\n"
+                     "                0: 'left',\n"
+                     "                1: 'center',\n"
+                     "                2: 'right',\n"
+                     "                3: 'justify'\n"
+                     "            }\n"
+                     "            alignment = alignment_map.get(block.alignment, '')\n"
+                     "        \n"
                      "        block_data = {\n"
                      "            'type': 'paragraph',\n"
                      "            'text': block.text,\n"
@@ -163,7 +173,8 @@ bool SimpleDocParser::parseDOCX(const QString &filePath, QString &outText)
                      "            'headingLevel': heading_level,\n"
                      "            'isHeading': is_heading,\n"
                      "            'fontName': para_font_name if para_font_name else '',\n"
-                     "            'fontSize': round(para_font_size) if para_font_size else 0\n"
+                     "            'fontSize': round(para_font_size) if para_font_size else 0,\n"
+                     "            'alignment': alignment\n"
                      "        }\n"
                      "        blocks_data.append(block_data)\n"
                      "        texts.append(block.text)\n"
@@ -193,7 +204,8 @@ bool SimpleDocParser::parseDOCX(const QString &filePath, QString &outText)
                      "                'tableCols': max_cols,\n"
                      "                'tableRows': len(table_data),\n"
                      "                'fontName': '',\n"
-                     "                'fontSize': 0\n"
+                     "                'fontSize': 0,\n"
+                     "                'alignment': ''\n"
                      "            }\n"
                      "            blocks_data.append(block_data)\n"
                      "            \n"
@@ -240,6 +252,7 @@ bool SimpleDocParser::parseDOCX(const QString &filePath, QString &outText)
         r.tableCols = obj["tableCols"].toInt();
         r.fontName = obj["fontName"].toString();
         r.fontSize = obj["fontSize"].toInt();
+        r.alignment = obj["alignment"].toString();
 
         m_runs.append(r);
     }
@@ -391,6 +404,7 @@ bool SimpleDocParser::buildDOCX(const QString &translatedText, const QString &pa
             obj["isTable"] = false;
             obj["fontName"] = run.fontName;
             obj["fontSize"] = run.fontSize;
+            obj["alignment"] = run.alignment;
             arr.append(obj);
         }
     }
@@ -409,6 +423,7 @@ bool SimpleDocParser::buildDOCX(const QString &translatedText, const QString &pa
         "import json\n"
         "from docx import Document\n"
         "from docx.shared import Pt\n"
+        "from docx.enum.text import WD_ALIGN_PARAGRAPH\n"
         "doc = Document()\n"
         "data = json.loads(r'''" + json + "''')\n"
                  "\n"
@@ -437,6 +452,7 @@ bool SimpleDocParser::buildDOCX(const QString &translatedText, const QString &pa
                  "        headingLevel = item.get('headingLevel', 1)\n"
                  "        font_name = item.get('fontName', '')\n"
                  "        font_size = item.get('fontSize', 0)\n"
+                 "        alignment = item.get('alignment', '')\n"
                  "        \n"
                  "        if not text and not isHeading:\n"
                  "            doc.add_paragraph()\n"
@@ -446,6 +462,15 @@ bool SimpleDocParser::buildDOCX(const QString &translatedText, const QString &pa
                  "            p = doc.add_heading(level=headingLevel)\n"
                  "        else:\n"
                  "            p = doc.add_paragraph()\n"
+                 "        \n"
+                 "        align_map = {\n"
+                 "            'left': WD_ALIGN_PARAGRAPH.LEFT,\n"
+                 "            'center': WD_ALIGN_PARAGRAPH.CENTER,\n"
+                 "            'right': WD_ALIGN_PARAGRAPH.RIGHT,\n"
+                 "            'justify': WD_ALIGN_PARAGRAPH.JUSTIFY\n"
+                 "        }\n"
+                 "        if alignment in align_map:\n"
+                 "            p.alignment = align_map[alignment]\n"
                  "        \n"
                  "        run = p.add_run(text)\n"
                  "        if bold:\n"
