@@ -47,7 +47,6 @@ bool SimpleDocParser::parseDOCX(const QString &filePath, QString &outText)
 
     QProcess process;
 
-    // 🔥 ИСПРАВЛЕНИЕ: Группируем runs по параграфам сразу в Python
     QString script =
         "import json\n"
         "import docx\n"
@@ -75,8 +74,44 @@ bool SimpleDocParser::parseDOCX(const QString &filePath, QString &outText)
         "        return 1\n"
         "    return 0\n"
         "\n"
+        "def get_font_info(run, para):\n"
+        "    font_name = None\n"
+        "    font_size_pt = None\n"
+        "    \n"
+        "    if run.font:\n"
+        "        if run.font.name:\n"
+        "            font_name = run.font.name\n"
+        "        if run.font.size:\n"
+        "            font_size_pt = run.font.size / 12700\n"
+        "    \n"
+        "    if not font_name and para.style and para.style.font:\n"
+        "        if para.style.font.name:\n"
+        "            font_name = para.style.font.name\n"
+        "    \n"
+        "    if not font_size_pt and para.style and para.style.font and para.style.font.size:\n"
+        "        font_size_pt = para.style.font.size / 12700\n"
+        "    \n"
+        "    try:\n"
+        "        rPr = run._element.find('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}rPr')\n"
+        "        if rPr is not None:\n"
+        "            rFonts = rPr.find('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}rFonts')\n"
+        "            if rFonts is not None:\n"
+        "                ascii_font = rFonts.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}ascii')\n"
+        "                if ascii_font and not font_name:\n"
+        "                    font_name = ascii_font\n"
+        "            \n"
+        "            sz = rPr.find('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}sz')\n"
+        "            if sz is not None:\n"
+        "                val = sz.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val')\n"
+        "                if val:\n"
+        "                    font_size_pt = int(val) / 2\n"
+        "    except:\n"
+        "        pass\n"
+        "    \n"
+        "    return font_name, font_size_pt\n"
+        "\n"
         "doc = docx.Document(r'''" + filePath + "''')\n"
-                     "blocks_data = []  # Каждый элемент = параграф или таблица\n"
+                     "blocks_data = []\n"
                      "texts = []\n"
                      "\n"
                      "for block in iter_block_items(doc):\n"
@@ -89,8 +124,10 @@ bool SimpleDocParser::parseDOCX(const QString &filePath, QString &outText)
                      "        heading_level = get_heading_level(block)\n"
                      "        is_heading = heading_level > 0\n"
                      "        \n"
-                     "        # Собираем runs параграфа\n"
                      "        para_runs = []\n"
+                     "        para_font_name = None\n"
+                     "        para_font_size = None\n"
+                     "        \n"
                      "        for run in block.runs:\n"
                      "            text = run.text\n"
                      "            if not text:\n"
@@ -100,6 +137,12 @@ bool SimpleDocParser::parseDOCX(const QString &filePath, QString &outText)
                      "            italic = bool(run.italic) if run.italic is not None else False\n"
                      "            underline = bool(run.underline) if run.underline is not None else False\n"
                      "            \n"
+                     "            font_name, font_size = get_font_info(run, block)\n"
+                     "            if font_name:\n"
+                     "                para_font_name = font_name\n"
+                     "            if font_size:\n"
+                     "                para_font_size = font_size\n"
+                     "            \n"
                      "            para_runs.append({\n"
                      "                'text': text,\n"
                      "                'bold': bold,\n"
@@ -107,7 +150,6 @@ bool SimpleDocParser::parseDOCX(const QString &filePath, QString &outText)
                      "                'underline': underline\n"
                      "            })\n"
                      "        \n"
-                     "        # Определяем стили параграфа (если хоть один run имеет стиль)\n"
                      "        has_bold = any(r['bold'] for r in para_runs)\n"
                      "        has_italic = any(r['italic'] for r in para_runs)\n"
                      "        has_underline = any(r['underline'] for r in para_runs)\n"
@@ -119,7 +161,9 @@ bool SimpleDocParser::parseDOCX(const QString &filePath, QString &outText)
                      "            'italic': has_italic,\n"
                      "            'underline': has_underline,\n"
                      "            'headingLevel': heading_level,\n"
-                     "            'isHeading': is_heading\n"
+                     "            'isHeading': is_heading,\n"
+                     "            'fontName': para_font_name if para_font_name else '',\n"
+                     "            'fontSize': round(para_font_size) if para_font_size else 0\n"
                      "        }\n"
                      "        blocks_data.append(block_data)\n"
                      "        texts.append(block.text)\n"
@@ -147,7 +191,9 @@ bool SimpleDocParser::parseDOCX(const QString &filePath, QString &outText)
                      "                'headingLevel': 0,\n"
                      "                'isHeading': False,\n"
                      "                'tableCols': max_cols,\n"
-                     "                'tableRows': len(table_data)\n"
+                     "                'tableRows': len(table_data),\n"
+                     "                'fontName': '',\n"
+                     "                'fontSize': 0\n"
                      "            }\n"
                      "            blocks_data.append(block_data)\n"
                      "            \n"
@@ -177,7 +223,6 @@ bool SimpleDocParser::parseDOCX(const QString &filePath, QString &outText)
 
     outText = textPart;
 
-    // 🔥 ИСПРАВЛЕНИЕ: Каждый block = один run
     QJsonDocument doc = QJsonDocument::fromJson(jsonPart.toUtf8());
     QJsonArray arr = doc.array();
 
@@ -193,6 +238,8 @@ bool SimpleDocParser::parseDOCX(const QString &filePath, QString &outText)
         r.headingLevel = obj["headingLevel"].toInt();
         r.isTable = (obj["type"].toString() == "table");
         r.tableCols = obj["tableCols"].toInt();
+        r.fontName = obj["fontName"].toString();
+        r.fontSize = obj["fontSize"].toInt();
 
         m_runs.append(r);
     }
@@ -238,7 +285,6 @@ bool SimpleDocParser::buildTXT(const QString &text, const QString &path)
 
 bool SimpleDocParser::buildDOCX(const QString &translatedText, const QString &path)
 {
-    // Нормализация текста
     QString normalizedText = translatedText;
     normalizedText.replace("\r\n", "\n");
     normalizedText.replace("\r", "\n");
@@ -258,7 +304,6 @@ bool SimpleDocParser::buildDOCX(const QString &translatedText, const QString &pa
 
     qDebug() << "translatedLines:" << lines.size() << "m_runs:" << m_runs.size();
 
-    // 🔥 Разделяем на текст и таблицы
     QStringList textLines;
     QStringList tableLines;
 
@@ -272,8 +317,6 @@ bool SimpleDocParser::buildDOCX(const QString &translatedText, const QString &pa
 
     qDebug() << "Text lines:" << textLines.size() << "Table lines:" << tableLines.size();
 
-    // 🔥 Собираем текстовые строки обратно в параграфы
-    // Считаем сколько текстовых runs (не таблиц)
     int textRunsCount = 0;
     for (const auto &run : m_runs) {
         if (!run.isTable) textRunsCount++;
@@ -281,12 +324,10 @@ bool SimpleDocParser::buildDOCX(const QString &translatedText, const QString &pa
 
     qDebug() << "Text runs count:" << textRunsCount;
 
-    // Распределяем текстовые строки по текстовым runs
     QStringList distributedText;
     if (textLines.size() == textRunsCount) {
         distributedText = textLines;
     } else if (textLines.size() > 0 && textRunsCount > 0) {
-        // Собираем весь текст и делим поровну
         QString fullText = textLines.join(" ");
         QStringList words = fullText.split(" ", Qt::SkipEmptyParts);
 
@@ -304,23 +345,19 @@ bool SimpleDocParser::buildDOCX(const QString &translatedText, const QString &pa
         }
     }
 
-    // Формируем JSON
     QJsonArray arr;
     int textIdx = 0;
     int tableIdx = 0;
 
     for (const auto &run : m_runs) {
         if (run.isTable) {
-            // Таблица
             QJsonObject obj;
             obj["isTable"] = true;
             obj["tableCols"] = run.tableCols;
 
-            // Парсим оригинальную структуру таблицы
             QJsonDocument tableDoc = QJsonDocument::fromJson(run.text.toUtf8());
             QJsonArray origTableData = tableDoc.array();
 
-            // Собираем переведённые строки таблицы
             QJsonArray translatedTableData;
             int rowsNeeded = origTableData.size();
 
@@ -338,10 +375,9 @@ bool SimpleDocParser::buildDOCX(const QString &translatedText, const QString &pa
             obj["tableData"] = translatedTableData;
             arr.append(obj);
         } else {
-            // Обычный параграф — берём готовый текст
             QString cleanText = (textIdx < distributedText.size())
-                                    ? distributedText[textIdx++]
-                                    : run.text;
+            ? distributedText[textIdx++]
+            : run.text;
 
             cleanText = cleanText.simplified();
 
@@ -353,6 +389,8 @@ bool SimpleDocParser::buildDOCX(const QString &translatedText, const QString &pa
             obj["heading"] = run.isHeading;
             obj["headingLevel"] = run.headingLevel;
             obj["isTable"] = false;
+            obj["fontName"] = run.fontName;
+            obj["fontSize"] = run.fontSize;
             arr.append(obj);
         }
     }
@@ -370,6 +408,7 @@ bool SimpleDocParser::buildDOCX(const QString &translatedText, const QString &pa
     QString script =
         "import json\n"
         "from docx import Document\n"
+        "from docx.shared import Pt\n"
         "doc = Document()\n"
         "data = json.loads(r'''" + json + "''')\n"
                  "\n"
@@ -396,6 +435,8 @@ bool SimpleDocParser::buildDOCX(const QString &translatedText, const QString &pa
                  "        underline = item['underline']\n"
                  "        isHeading = item['heading']\n"
                  "        headingLevel = item.get('headingLevel', 1)\n"
+                 "        font_name = item.get('fontName', '')\n"
+                 "        font_size = item.get('fontSize', 0)\n"
                  "        \n"
                  "        if not text and not isHeading:\n"
                  "            doc.add_paragraph()\n"
@@ -413,6 +454,11 @@ bool SimpleDocParser::buildDOCX(const QString &translatedText, const QString &pa
                  "            run.italic = True\n"
                  "        if underline:\n"
                  "            run.underline = True\n"
+                 "        \n"
+                 "        if font_name:\n"
+                 "            run.font.name = font_name\n"
+                 "        if font_size > 0:\n"
+                 "            run.font.size = Pt(font_size)\n"
                  "\n"
                  "doc.save(r'''" + safePath + "''')\n"
                      "print('OK')\n";
