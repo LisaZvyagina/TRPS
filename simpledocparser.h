@@ -25,6 +25,8 @@ private:
         int headingLevel = 0;
         bool isTable = false;
         int tableCols = 0;
+        QString fontName;
+        int fontSize = 0;
     };
 
     QList<TextRun> m_runs;
@@ -36,8 +38,6 @@ private:
     bool buildTXT(const QString &translatedText, const QString &outputPath);
     bool buildDOCX(const QString &translatedText, const QString &outputPath);
     bool buildPDF(const QString &translatedText, const QString &outputPath);
-
-    QStringList distributeLines(const QStringList &lines, int targetCount);
 };
 
 #endif
