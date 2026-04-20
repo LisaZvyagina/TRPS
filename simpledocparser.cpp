@@ -17,16 +17,16 @@ bool SimpleDocParser::parse(const QString &filePath, QString &outText, QString &
 {
     Q_UNUSED(outFormatInfo);
     m_runs.clear();
-
+    
     if (filePath.endsWith(".txt", Qt::CaseInsensitive))
         return parseTXT(filePath, outText);
-
+    
     if (filePath.endsWith(".docx", Qt::CaseInsensitive))
         return parseDOCX(filePath, outText);
-
+    
     if (filePath.endsWith(".pdf", Qt::CaseInsensitive))
         return parsePDF(filePath, outText);
-
+    
     return false;
 }
 
@@ -35,7 +35,7 @@ bool SimpleDocParser::parseTXT(const QString &filePath, QString &outText)
     QFile file(filePath);
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
         return false;
-
+    
     QTextStream in(&file);
     outText = in.readAll();
     return true;
@@ -44,9 +44,9 @@ bool SimpleDocParser::parseTXT(const QString &filePath, QString &outText)
 bool SimpleDocParser::parseDOCX(const QString &filePath, QString &outText)
 {
     m_runs.clear();
-
+    
     QProcess process;
-
+    
     QString script =
         "import json\n"
         "import docx\n"
@@ -119,7 +119,6 @@ bool SimpleDocParser::parseDOCX(const QString &filePath, QString &outText)
         "    alignment = ''\n"
         "    \n"
         "    for para in cell.paragraphs:\n"
-        "        # Берем выравнивание из первого параграфа ячейки\n"
         "        if not alignment and para.alignment is not None:\n"
         "            alignment_map = {\n"
         "                0: 'left',\n"
@@ -213,7 +212,8 @@ bool SimpleDocParser::parseDOCX(const QString &filePath, QString &outText)
                      "            'isHeading': is_heading,\n"
                      "            'fontName': para_font_name if para_font_name else '',\n"
                      "            'fontSize': round(para_font_size) if para_font_size else 0,\n"
-                     "            'alignment': alignment\n"
+                     "            'alignment': alignment,\n"
+                     "            'xPos': 0\n"
                      "        }\n"
                      "        blocks_data.append(block_data)\n"
                      "        texts.append(block.text)\n"
@@ -253,7 +253,8 @@ bool SimpleDocParser::parseDOCX(const QString &filePath, QString &outText)
                      "                'tableRows': len(table_data),\n"
                      "                'fontName': '',\n"
                      "                'fontSize': 0,\n"
-                     "                'alignment': ''\n"
+                     "                'alignment': '',\n"
+                     "                'xPos': 0\n"
                      "            }\n"
                      "            blocks_data.append(block_data)\n"
                      "            \n"
@@ -266,29 +267,29 @@ bool SimpleDocParser::parseDOCX(const QString &filePath, QString &outText)
                      "print(json.dumps(blocks_data, ensure_ascii=False))\n"
                      "print('###TEXT###')\n"
                      "print('\\n'.join(texts))\n";
-
+    
     process.start("py", QStringList() << "-3" << "-c" << script);
     process.waitForFinished();
-
+    
     QString output = QString::fromUtf8(process.readAllStandardOutput());
-
+    
     int jsonStart = output.indexOf("###JSON###");
     int textStart = output.indexOf("###TEXT###");
-
+    
     if (jsonStart == -1 || textStart == -1)
         return false;
-
+    
     QString jsonPart = output.mid(jsonStart + 10, textStart - (jsonStart + 10)).trimmed();
     QString textPart = output.mid(textStart + 10).trimmed();
-
+    
     outText = textPart;
-
+    
     QJsonDocument doc = QJsonDocument::fromJson(jsonPart.toUtf8());
     QJsonArray arr = doc.array();
-
+    
     for (auto v : arr) {
         QJsonObject obj = v.toObject();
-
+        
         TextRun r;
         r.text = obj["text"].toString();
         r.bold = obj["bold"].toBool();
@@ -301,35 +302,178 @@ bool SimpleDocParser::parseDOCX(const QString &filePath, QString &outText)
         r.fontName = obj["fontName"].toString();
         r.fontSize = obj["fontSize"].toInt();
         r.alignment = obj["alignment"].toString();
-
+        r.xPos = obj["xPos"].toDouble();
+        
         m_runs.append(r);
     }
-
+    
     return true;
 }
 
 bool SimpleDocParser::parsePDF(const QString &filePath, QString &outText)
 {
+    m_runs.clear();
+    
     QProcess process;
-
-    QString program =
-        "C:/Users/Denis/Downloads/Release-25.12.0-0/poppler-25.12.0/Library/bin/pdftotext.exe";
-
-    process.start(program, QStringList() << filePath << "-");
+    
+    QString script =
+        "import json\n"
+        "import fitz\n"
+        "import sys\n"
+        "sys.stdout.reconfigure(encoding='utf-8')\n"
+        "\n"
+        "def detect_alignment(line, page_width, left_margin=50):\n"
+        "    \"\"\"Определяет выравнивание строки по позиции первого символа.\"\"\"\n"
+        "    x0 = line['bbox'][0]\n"
+        "    x1 = line['bbox'][2]\n"
+        "    line_width = x1 - x0\n"
+        "    \n"
+        "    # Если строка почти на всю ширину — left\n"
+        "    if line_width > page_width * 0.75:\n"
+        "        return 'left'\n"
+        "    \n"
+        "    # Если левый край близок к левому полю — left\n"
+        "    if x0 < left_margin + 20:\n"
+        "        return 'left'\n"
+        "    \n"
+        "    # Если правый край близок к правому краю страницы — right\n"
+        "    if page_width - x1 < 30:\n"
+        "        return 'right'\n"
+        "    \n"
+        "    # Если левый отступ значительный, но не до правого края — center\n"
+        "    if x0 > left_margin + 50:\n"
+        "        return 'center'\n"
+        "    \n"
+        "    return 'left'\n"
+        "\n"
+        "doc = fitz.open(r'''" + filePath + "''')\n"
+                     "blocks_data = []\n"
+                     "texts = []\n"
+                     "\n"
+                     "for page in doc:\n"
+                     "    page_width = page.rect.width\n"
+                     "    blocks = page.get_text('dict')['blocks']\n"
+                     "    \n"
+                     "    for block in blocks:\n"
+                     "        if 'lines' not in block:\n"
+                     "            continue\n"
+                     "        \n"
+                     "        for line in block['lines']:\n"
+                     "            line_text_parts = []\n"
+                     "            line_runs = []\n"
+                     "            \n"
+                     "            for span in line['spans']:\n"
+                     "                text = span['text']\n"
+                     "                if not text.strip():\n"
+                     "                    continue\n"
+                     "                \n"
+                     "                flags = span['flags']\n"
+                     "                bold = bool(flags & 2 ** 4)\n"
+                     "                italic = bool(flags & 2 ** 1)\n"
+                     "                underline = bool(flags & 2 ** 7)\n"
+                     "                font = span['font']\n"
+                     "                size = span['size']\n"
+                     "                \n"
+                     "                line_runs.append({\n"
+                     "                    'text': text,\n"
+                     "                    'bold': bold,\n"
+                     "                    'italic': italic,\n"
+                     "                    'underline': underline,\n"
+                     "                    'fontName': font,\n"
+                     "                    'fontSize': round(size, 1)\n"
+                     "                })\n"
+                     "                line_text_parts.append(text)\n"
+                     "            \n"
+                     "            if line_runs:\n"
+                     "                full_text = ''.join(line_text_parts)\n"
+                     "                \n"
+                     "                has_bold = any(r['bold'] for r in line_runs)\n"
+                     "                has_italic = any(r['italic'] for r in line_runs)\n"
+                     "                has_underline = any(r['underline'] for r in line_runs)\n"
+                     "                \n"
+                     "                font_counts = {}\n"
+                     "                size_counts = {}\n"
+                     "                for r in line_runs:\n"
+                     "                    font_counts[r['fontName']] = font_counts.get(r['fontName'], 0) + len(r['text'])\n"
+                     "                    size_counts[r['fontSize']] = size_counts.get(r['fontSize'], 0) + len(r['text'])\n"
+                     "                \n"
+                     "                main_font = max(font_counts, key=font_counts.get) if font_counts else ''\n"
+                     "                main_size = max(size_counts, key=size_counts.get) if size_counts else 0\n"
+                     "                \n"
+                     "                alignment = detect_alignment(line, page_width)\n"
+                     "                \n"
+                     "                block_data = {\n"
+                     "                    'type': 'paragraph',\n"
+                     "                    'text': full_text,\n"
+                     "                    'bold': has_bold,\n"
+                     "                    'italic': has_italic,\n"
+                     "                    'underline': has_underline,\n"
+                     "                    'headingLevel': 0,\n"
+                     "                    'isHeading': False,\n"
+                     "                    'fontName': main_font,\n"
+                     "                    'fontSize': main_size,\n"
+                     "                    'alignment': alignment,\n"
+                     "                    'xPos': 0\n"
+                     "                }\n"
+                     "                blocks_data.append(block_data)\n"
+                     "                texts.append(full_text)\n"
+                     "\n"
+                     "doc.close()\n"
+                     "\n"
+                     "print('###JSON###')\n"
+                     "print(json.dumps(blocks_data, ensure_ascii=False))\n"
+                     "print('###TEXT###')\n"
+                     "print('\\n'.join(texts))\n";
+    
+    process.start("py", QStringList() << "-3" << "-c" << script);
     process.waitForFinished();
-
-    outText = QString::fromUtf8(process.readAllStandardOutput());
-    return !outText.isEmpty();
+    
+    QString output = QString::fromUtf8(process.readAllStandardOutput());
+    
+    int jsonStart = output.indexOf("###JSON###");
+    int textStart = output.indexOf("###TEXT###");
+    
+    if (jsonStart == -1 || textStart == -1)
+        return false;
+    
+    QString jsonPart = output.mid(jsonStart + 10, textStart - (jsonStart + 10)).trimmed();
+    QString textPart = output.mid(textStart + 10).trimmed();
+    
+    outText = textPart;
+    
+    QJsonDocument doc = QJsonDocument::fromJson(jsonPart.toUtf8());
+    QJsonArray arr = doc.array();
+    
+    for (auto v : arr) {
+        QJsonObject obj = v.toObject();
+        
+        TextRun r;
+        r.text = obj["text"].toString();
+        r.bold = obj["bold"].toBool();
+        r.italic = obj["italic"].toBool();
+        r.underline = obj["underline"].toBool();
+        r.isHeading = obj["isHeading"].toBool();
+        r.headingLevel = obj["headingLevel"].toInt();
+        r.isTable = (obj["type"].toString() == "table");
+        r.tableCols = obj["tableCols"].toInt();
+        r.fontName = obj["fontName"].toString();
+        r.fontSize = obj["fontSize"].toInt();
+        r.alignment = obj["alignment"].toString();
+        r.xPos = obj["xPos"].toDouble();
+        
+        m_runs.append(r);
+    }
+    
+    return true;
 }
-
 bool SimpleDocParser::build(const QString &text, const QString &path)
 {
     if (path.endsWith(".docx"))
         return buildDOCX(text, path);
-
+    
     if (path.endsWith(".pdf"))
         return buildPDF(text, path);
-
+    
     return buildTXT(text, path);
 }
 
@@ -338,7 +482,7 @@ bool SimpleDocParser::buildTXT(const QString &text, const QString &path)
     QFile file(path);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
         return false;
-
+    
     QTextStream out(&file);
     out << text;
     return true;
@@ -349,25 +493,25 @@ bool SimpleDocParser::buildDOCX(const QString &translatedText, const QString &pa
     QString normalizedText = translatedText;
     normalizedText.replace("\r\n", "\n");
     normalizedText.replace("\r", "\n");
-
+    
     while (normalizedText.contains("\n\n")) {
         normalizedText.replace("\n\n", "\n");
     }
-
+    
     QStringList lines = normalizedText.split("\n", Qt::KeepEmptyParts);
-
+    
     while (!lines.isEmpty() && lines.first().isEmpty()) {
         lines.removeFirst();
     }
     while (!lines.isEmpty() && lines.last().isEmpty()) {
         lines.removeLast();
     }
-
+    
     qDebug() << "translatedLines:" << lines.size() << "m_runs:" << m_runs.size();
-
+    
     QStringList textLines;
     QStringList tableLines;
-
+    
     for (const QString &line : lines) {
         if (line.contains(" | ")) {
             tableLines.append(line);
@@ -375,26 +519,26 @@ bool SimpleDocParser::buildDOCX(const QString &translatedText, const QString &pa
             textLines.append(line);
         }
     }
-
+    
     qDebug() << "Text lines:" << textLines.size() << "Table lines:" << tableLines.size();
-
+    
     int textRunsCount = 0;
     for (const auto &run : m_runs) {
         if (!run.isTable) textRunsCount++;
     }
-
+    
     qDebug() << "Text runs count:" << textRunsCount;
-
+    
     QStringList distributedText;
     if (textLines.size() == textRunsCount) {
         distributedText = textLines;
     } else if (textLines.size() > 0 && textRunsCount > 0) {
         QString fullText = textLines.join(" ");
         QStringList words = fullText.split(" ", Qt::SkipEmptyParts);
-
+        
         int wordsPerRun = words.size() / textRunsCount;
         int remainder = words.size() % textRunsCount;
-
+        
         int wordIdx = 0;
         for (int i = 0; i < textRunsCount; ++i) {
             int count = wordsPerRun + (i < remainder ? 1 : 0);
@@ -405,33 +549,33 @@ bool SimpleDocParser::buildDOCX(const QString &translatedText, const QString &pa
             distributedText.append(runWords.join(" "));
         }
     }
-
+    
     QJsonArray arr;
     int textIdx = 0;
     int tableIdx = 0;
-
+    
     for (const auto &run : m_runs) {
         if (run.isTable) {
             QJsonObject obj;
             obj["isTable"] = true;
             obj["tableCols"] = run.tableCols;
-
+            
             QJsonDocument tableDoc = QJsonDocument::fromJson(run.text.toUtf8());
             QJsonArray origTableData = tableDoc.array();
-
+            
             QJsonArray translatedTableData;
             int rowsNeeded = origTableData.size();
-
+            
             for (int r = 0; r < rowsNeeded && tableIdx < tableLines.size(); ++r) {
                 QString line = tableLines[tableIdx++];
                 QStringList cells = line.split("|", Qt::SkipEmptyParts);
-
+                
                 QJsonArray rowArray;
                 int cellIdx = 0;
                 for (const QString &cell : cells) {
                     QJsonObject cellObj;
                     cellObj["text"] = cell.trimmed();
-
+                    
                     if (r < origTableData.size()) {
                         QJsonArray origRow = origTableData[r].toArray();
                         if (cellIdx < origRow.size()) {
@@ -444,22 +588,22 @@ bool SimpleDocParser::buildDOCX(const QString &translatedText, const QString &pa
                             cellObj["alignment"] = origCell["alignment"].toString();
                         }
                     }
-
+                    
                     rowArray.append(cellObj);
                     cellIdx++;
                 }
                 translatedTableData.append(rowArray);
             }
-
+            
             obj["tableData"] = translatedTableData;
             arr.append(obj);
         } else {
             QString cleanText = (textIdx < distributedText.size())
             ? distributedText[textIdx++]
             : run.text;
-
+            
             cleanText = cleanText.simplified();
-
+            
             QJsonObject obj;
             obj["text"] = cleanText;
             obj["bold"] = run.bold;
@@ -471,20 +615,21 @@ bool SimpleDocParser::buildDOCX(const QString &translatedText, const QString &pa
             obj["fontName"] = run.fontName;
             obj["fontSize"] = run.fontSize;
             obj["alignment"] = run.alignment;
+            obj["xPos"] = run.xPos;
             arr.append(obj);
         }
     }
-
+    
     QJsonDocument doc(arr);
     QString json = QString::fromUtf8(doc.toJson(QJsonDocument::Compact));
     json.replace("\\", "\\\\");
     json.replace("'''", " ");
-
+    
     QString safePath = path;
     safePath.replace("\\", "\\\\");
-
+    
     QProcess process;
-
+    
     QString script =
         "import json\n"
         "from docx import Document\n"
@@ -582,93 +727,354 @@ bool SimpleDocParser::buildDOCX(const QString &translatedText, const QString &pa
                  "\n"
                  "doc.save(r'''" + safePath + "''')\n"
                      "print('OK')\n";
-
+    
     process.start("py", QStringList() << "-3" << "-c" << script);
     process.waitForFinished();
-
+    
     QString error = QString::fromUtf8(process.readAllStandardError());
     if (!error.isEmpty()) {
         qDebug() << "Python error:" << error;
         return false;
     }
-
+    
     return true;
 }
 
 bool SimpleDocParser::buildPDF(const QString &text, const QString &path)
 {
-    QPdfWriter writer(path);
-    writer.setPageSize(QPageSize(QPageSize::A4));
-    writer.setResolution(300);
-
-    QPainter painter(&writer);
-
-    QFont font("Times New Roman", 12);
-    painter.setFont(font);
-
-    QFontMetrics fm(font);
-
-    int left = 60;
-    int top = 80;
-    int right = writer.width() - 60;
-    int bottom = writer.height() - 80;
-
-    int maxWidth = right - left;
-    int y = top;
-    int lineHeight = fm.height() + 6;
-
-    QStringList paragraphs = text.split("\n");
-
-    for (const QString &paragraph : paragraphs) {
-
-        QString trimmed = paragraph.trimmed();
-
-        if (trimmed.isEmpty()) {
-            y += lineHeight;
-            continue;
-        }
-
-        QString currentLine;
-        QStringList words = trimmed.split(" ", Qt::SkipEmptyParts);
-
-        for (const QString &word : words) {
-
-            QString testLine = currentLine.isEmpty()
-            ? word
-            : currentLine + " " + word;
-
-            if (fm.horizontalAdvance(testLine) > maxWidth) {
-
-                painter.drawText(left, y, currentLine);
-                y += lineHeight;
-
-                currentLine = word;
-
-                if (y > bottom) {
-                    writer.newPage();
-                    painter.setFont(font);
-                    y = top;
-                }
-            }
-            else {
-                currentLine = testLine;
-            }
-        }
-
-        if (!currentLine.isEmpty()) {
-            painter.drawText(left, y, currentLine);
-            y += lineHeight;
-        }
-
-        y += lineHeight / 2;
-
-        if (y > bottom) {
-            writer.newPage();
-            painter.setFont(font);
-            y = top;
+    QString normalizedText = text;
+    normalizedText.replace("\r\n", "\n");
+    normalizedText.replace("\r", "\n");
+    
+    while (normalizedText.contains("\n\n")) {
+        normalizedText.replace("\n\n", "\n");
+    }
+    
+    QStringList lines = normalizedText.split("\n", Qt::KeepEmptyParts);
+    
+    while (!lines.isEmpty() && lines.first().isEmpty()) {
+        lines.removeFirst();
+    }
+    while (!lines.isEmpty() && lines.last().isEmpty()) {
+        lines.removeLast();
+    }
+    
+    QStringList textLines;
+    QStringList tableLines;
+    
+    for (const QString &line : lines) {
+        if (line.contains(" | ")) {
+            tableLines.append(line);
+        } else {
+            textLines.append(line);
         }
     }
-
-    painter.end();
+    
+    int textRunsCount = 0;
+    for (const auto &run : m_runs) {
+        if (!run.isTable) textRunsCount++;
+    }
+    
+    QStringList distributedText;
+    if (textLines.size() == textRunsCount) {
+        distributedText = textLines;
+    } else if (textLines.size() > 0 && textRunsCount > 0) {
+        QString fullText = textLines.join(" ");
+        QStringList words = fullText.split(" ", Qt::SkipEmptyParts);
+        
+        int wordsPerRun = words.size() / textRunsCount;
+        int remainder = words.size() % textRunsCount;
+        
+        int wordIdx = 0;
+        for (int i = 0; i < textRunsCount; ++i) {
+            int count = wordsPerRun + (i < remainder ? 1 : 0);
+            QStringList runWords;
+            for (int j = 0; j < count && wordIdx < words.size(); ++j) {
+                runWords.append(words[wordIdx++]);
+            }
+            distributedText.append(runWords.join(" "));
+        }
+    }
+    
+    QJsonArray arr;
+    int textIdx = 0;
+    int tableIdx = 0;
+    
+    for (const auto &run : m_runs) {
+        if (run.isTable) {
+            QJsonObject obj;
+            obj["isTable"] = true;
+            obj["tableCols"] = run.tableCols;
+            
+            QJsonDocument tableDoc = QJsonDocument::fromJson(run.text.toUtf8());
+            QJsonArray origTableData = tableDoc.array();
+            
+            QJsonArray translatedTableData;
+            int rowsNeeded = origTableData.size();
+            
+            for (int r = 0; r < rowsNeeded && tableIdx < tableLines.size(); ++r) {
+                QString line = tableLines[tableIdx++];
+                QStringList cells = line.split("|", Qt::SkipEmptyParts);
+                
+                QJsonArray rowArray;
+                int cellIdx = 0;
+                for (const QString &cell : cells) {
+                    QJsonObject cellObj;
+                    cellObj["text"] = cell.trimmed();
+                    
+                    if (r < origTableData.size()) {
+                        QJsonArray origRow = origTableData[r].toArray();
+                        if (cellIdx < origRow.size()) {
+                            QJsonObject origCell = origRow[cellIdx].toObject();
+                            cellObj["fontName"] = origCell["fontName"].toString();
+                            cellObj["fontSize"] = origCell["fontSize"].toInt();
+                            cellObj["bold"] = origCell["bold"].toBool();
+                            cellObj["italic"] = origCell["italic"].toBool();
+                            cellObj["underline"] = origCell["underline"].toBool();
+                            cellObj["alignment"] = origCell["alignment"].toString();
+                        }
+                    }
+                    
+                    rowArray.append(cellObj);
+                    cellIdx++;
+                }
+                translatedTableData.append(rowArray);
+            }
+            
+            obj["tableData"] = translatedTableData;
+            arr.append(obj);
+        } else {
+            QString cleanText = (textIdx < distributedText.size())
+            ? distributedText[textIdx++]
+            : run.text;
+            
+            cleanText = cleanText.simplified();
+            
+            QJsonObject obj;
+            obj["text"] = cleanText;
+            obj["bold"] = run.bold;
+            obj["italic"] = run.italic;
+            obj["underline"] = run.underline;
+            obj["heading"] = run.isHeading;
+            obj["headingLevel"] = run.headingLevel;
+            obj["isTable"] = false;
+            obj["fontName"] = run.fontName;
+            obj["fontSize"] = run.fontSize;
+            obj["alignment"] = run.alignment;
+            obj["xPos"] = run.xPos;
+            arr.append(obj);
+        }
+    }
+    
+    QJsonDocument doc(arr);
+    QString json = QString::fromUtf8(doc.toJson(QJsonDocument::Compact));
+    json.replace("\\", "\\\\");
+    json.replace("'''", " ");
+    
+    QString safePath = path;
+    safePath.replace("\\", "\\\\");
+    
+    QProcess process;
+    
+    QString script =
+        "import json\n"
+        "from fpdf import FPDF\n"
+        "import sys\n"
+        "import traceback\n"
+        "sys.stdout.reconfigure(encoding='utf-8')\n"
+        "sys.stderr.reconfigure(encoding='utf-8')\n"
+        "\n"
+        "try:\n"
+        "    class PDF(FPDF):\n"
+        "        def header(self):\n"
+        "            pass\n"
+        "        def footer(self):\n"
+        "            pass\n"
+        "\n"
+        "    pdf = PDF()\n"
+        "    pdf.set_auto_page_break(auto=True, margin=15)\n"
+        "    pdf.add_page()\n"
+        "\n"
+        "    data = json.loads(r'''" + json + "''')\n"
+                 "\n"
+                 "    for item in data:\n"
+                 "        is_table = item.get('isTable', False)\n"
+                 "        \n"
+                 "        if is_table:\n"
+                 "            table_data = item.get('tableData', [])\n"
+                 "            cols = item.get('tableCols', 1)\n"
+                 "            \n"
+                 "            if table_data and cols > 0:\n"
+                 "                rows = len(table_data)\n"
+                 "                col_width = (pdf.w - 30) / cols\n"
+                 "                line_height = 6\n"
+                 "                \n"
+                 "                for r in range(rows):\n"
+                 "                    row_data = table_data[r]\n"
+                 "                    \n"
+                 "                    max_lines = 1\n"
+                 "                    for c in range(min(len(row_data), cols)):\n"
+                 "                        cell_data = row_data[c]\n"
+                 "                        text = cell_data.get('text', '')\n"
+                 "                        font_size = cell_data.get('fontSize', 11)\n"
+                 "                        if font_size <= 0:\n"
+                 "                            font_size = 11\n"
+                 "                        pdf.set_font_size(font_size)\n"
+                 "                        text_width = pdf.get_string_width(text)\n"
+                 "                        lines_needed = max(1, int(text_width / (col_width - 2)) + 1)\n"
+                 "                        max_lines = max(max_lines, lines_needed)\n"
+                 "                    \n"
+                 "                    row_height = max_lines * line_height\n"
+                 "                    \n"
+                 "                    x_start = pdf.l_margin\n"
+                 "                    y_start = pdf.get_y()\n"
+                 "                    \n"
+                 "                    for c in range(min(len(row_data), cols)):\n"
+                 "                        cell_data = row_data[c]\n"
+                 "                        text = cell_data.get('text', '')\n"
+                 "                        bold = cell_data.get('bold', False)\n"
+                 "                        italic = cell_data.get('italic', False)\n"
+                 "                        underline = cell_data.get('underline', False)\n"
+                 "                        font_size = cell_data.get('fontSize', 11)\n"
+                 "                        alignment = cell_data.get('alignment', '')\n"
+                 "                        \n"
+                 "                        if font_size <= 0:\n"
+                 "                            font_size = 11\n"
+                 "                        \n"
+                 "                        font_name = cell_data.get('fontName', '')\n"
+                 "                        \n"
+                 "                        if 'times' in font_name.lower() or 'timesnewroman' in font_name.lower():\n"
+                 "                            family = 'Times'\n"
+                 "                        elif 'arial' in font_name.lower():\n"
+                 "                            family = 'Arial'\n"
+                 "                        elif 'courier' in font_name.lower():\n"
+                 "                            family = 'Courier'\n"
+                 "                        else:\n"
+                 "                            family = 'Arial'\n"
+                 "                        \n"
+                 "                        style = ''\n"
+                 "                        if bold:\n"
+                 "                            style += 'B'\n"
+                 "                        if italic:\n"
+                 "                            style += 'I'\n"
+                 "                        if underline:\n"
+                 "                            style += 'U'\n"
+                 "                        \n"
+                 "                        pdf.set_font(family, style, font_size)\n"
+                 "                        \n"
+                 "                        x = x_start + c * col_width\n"
+                 "                        pdf.rect(x, y_start, col_width, row_height)\n"
+                 "                        \n"
+                 "                        if alignment == 'center':\n"
+                 "                            align = 'C'\n"
+                 "                        elif alignment == 'right':\n"
+                 "                            align = 'R'\n"
+                 "                        else:\n"
+                 "                            align = 'L'\n"
+                 "                        \n"
+                 "                        pdf.set_xy(x, y_start)\n"
+                 "                        pdf.multi_cell(col_width, line_height, text, border=0, align=align)\n"
+                 "                    \n"
+                 "                    pdf.set_y(y_start + row_height)\n"
+                 "                    \n"
+                 "                    if pdf.get_y() > pdf.h - 30:\n"
+                 "                        pdf.add_page()\n"
+                 "        else:\n"
+                 "            text = item.get('text', '')\n"
+                 "            bold = item.get('bold', False)\n"
+                 "            italic = item.get('italic', False)\n"
+                 "            underline = item.get('underline', False)\n"
+                 "            font_name = item.get('fontName', '')\n"
+                 "            font_size = item.get('fontSize', 11)\n"
+                 "            alignment = item.get('alignment', '')\n"
+                 "            x_pos = item.get('xPos', 0)\n"
+                 "            \n"
+                 "            if font_size <= 0:\n"
+                 "                font_size = 11\n"
+                 "            \n"
+                 "            if 'times' in font_name.lower() or 'timesnewroman' in font_name.lower():\n"
+                 "                family = 'Times'\n"
+                 "            elif 'arial' in font_name.lower():\n"
+                 "                family = 'Arial'\n"
+                 "            elif 'courier' in font_name.lower():\n"
+                 "                family = 'Courier'\n"
+                 "            else:\n"
+                 "                family = 'Arial'\n"
+                 "            \n"
+                 "            style = ''\n"
+                 "            if bold:\n"
+                 "                style += 'B'\n"
+                 "            if italic:\n"
+                 "                style += 'I'\n"
+                 "            if underline:\n"
+                 "                style += 'U'\n"
+                 "            \n"
+                 "            pdf.set_font(family, style, font_size)\n"
+                 "            \n"
+                 "            if not text.strip():\n"
+                 "                pdf.ln(font_size / 2)\n"
+                 "                continue\n"
+                 "            \n"
+                 "            text_width = pdf.get_string_width(text)\n"
+                 "            page_width = pdf.w - pdf.l_margin - pdf.r_margin\n"
+                 "            \n"
+                 "            # Выравнивание через сохраненную позицию X или через alignment\n"
+                 "            if x_pos > 0 and alignment != 'center':\n"
+                 "                # Используем оригинальную позицию X из PDF\n"
+                 "                pdf.set_x(x_pos)\n"
+                 "                pdf.cell(text_width, font_size * 0.5, text, ln=True)\n"
+                 "            elif alignment == 'center':\n"
+                 "                x_offset = (page_width - text_width) / 2\n"
+                 "                if x_offset < 0:\n"
+                 "                    x_offset = 0\n"
+                 "                pdf.set_x(pdf.l_margin + x_offset)\n"
+                 "                pdf.cell(text_width, font_size * 0.5, text, ln=True)\n"
+                 "            elif alignment == 'right':\n"
+                 "                x_offset = page_width - text_width\n"
+                 "                if x_offset < 0:\n"
+                 "                    x_offset = 0\n"
+                 "                pdf.set_x(pdf.l_margin + x_offset)\n"
+                 "                pdf.cell(text_width, font_size * 0.5, text, ln=True)\n"
+                 "            else:\n"
+                 "                # Левое выравнивание — просто cell\n"
+                 "                pdf.cell(0, font_size * 0.5, text, ln=True)\n"
+                 "            \n"
+                 "            pdf.ln(font_size * 0.2)\n"
+                 "            \n"
+                 "            if pdf.get_y() > pdf.h - 30:\n"
+                 "                pdf.add_page()\n"
+                 "\n"
+                 "    pdf.output(r'''" + safePath + "''')\n"
+                     "    print('OK')\n"
+                     "except Exception as e:\n"
+                     "    print('ERROR: ' + str(e), file=sys.stderr)\n"
+                     "    traceback.print_exc(file=sys.stderr)\n"
+                     "    sys.exit(1)\n";
+    
+    process.start("py", QStringList() << "-3" << "-c" << script);
+    
+    if (!process.waitForFinished(60000)) {
+        qDebug() << "PDF build timeout or crash";
+        return false;
+    }
+    
+    int exitCode = process.exitCode();
+    QString stdOut = QString::fromUtf8(process.readAllStandardOutput()).trimmed();
+    QString stdErr = QString::fromUtf8(process.readAllStandardError()).trimmed();
+    
+    qDebug() << "PDF build exit code:" << exitCode;
+    qDebug() << "PDF build stdout:" << stdOut;
+    qDebug() << "PDF build stderr:" << stdErr;
+    
+    if (exitCode != 0) {
+        qDebug() << "PDF build failed with exit code:" << exitCode;
+        return false;
+    }
+    
+    if (!stdOut.contains("OK")) {
+        qDebug() << "PDF build did not return OK, stdout:" << stdOut;
+        return false;
+    }
+    
     return true;
 }
