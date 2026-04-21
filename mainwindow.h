@@ -1,6 +1,9 @@
 #ifndef MAINWINDOW_H
 #define MAINWINDOW_H
 
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QMimeData>
 #include <QMainWindow>
 #include <QTextEdit>
 #include <QPushButton>
@@ -28,6 +31,10 @@ private slots:
     void onTranslateClicked();
     void onTranslationFinished(const QString &translatedText, bool success, const QString &error);
     void onProgressUpdated(int percent);
+
+protected:
+    void dragEnterEvent(QDragEnterEvent *event) override;
+    void dropEvent(QDropEvent *event) override;
 
 private:
     void setupUI();
