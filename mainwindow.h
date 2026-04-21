@@ -11,6 +11,10 @@
 #include <QProgressBar>
 #include <QFileDialog>
 #include <QMessageBox>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QMimeData>
+#include <QQueue>
 
 class SimpleDocParser;
 class SimpleTranslator;
@@ -29,9 +33,14 @@ private slots:
     void onTranslationFinished(const QString &translatedText, bool success, const QString &error);
     void onProgressUpdated(int percent);
 
+protected:
+    void dragEnterEvent(QDragEnterEvent *event) override;
+    void dropEvent(QDropEvent *event) override;
+
 private:
     void setupUI();
     void appendLog(const QString &message);
+    void processNextFile();  // новая функция для пакетной обработки
 
     QWidget *m_centralWidget;
     QVBoxLayout *m_mainLayout;
@@ -55,6 +64,10 @@ private:
     QString m_currentFilePath;
     SimpleDocParser *m_parser;
     SimpleTranslator *m_translator;
+
+    // Пакетная обработка
+    QQueue<QString> m_fileQueue;
+    bool m_isTranslating;
 };
 
 #endif // MAINWINDOW_H
