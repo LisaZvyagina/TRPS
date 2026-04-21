@@ -14,10 +14,11 @@
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent),
     m_parser(new SimpleDocParser(this)),
-    m_translator(new SimpleTranslator(this))
+    m_translator(new SimpleTranslator(this)),
+    m_isTranslating(false)
 {
     setupUI();
-
+    setAcceptDrops(true);
     appendLog("Приложение запущено.");
 
     connect(m_translator, &SimpleTranslator::translationFinished,
@@ -88,20 +89,25 @@ void MainWindow::appendLog(const QString &message)
 
 void MainWindow::onSelectFileClicked()
 {
-    QString filePath = QFileDialog::getOpenFileName(
+    QStringList filePaths = QFileDialog::getOpenFileNames(
         this,
-        "Выберите файл",
+        "Выберите файлы (можно несколько)",
         "",
         "Files (*.txt *.docx *.pdf)");
 
-    if (filePath.isEmpty())
+    if (filePaths.isEmpty())
         return;
 
-    m_currentFilePath = filePath;
-    m_fileLabel->setText(QFileInfo(filePath).fileName());
-    m_translateBtn->setEnabled(true);
+    // Добавляем все выбранные файлы в очередь
+    for (const QString &filePath : filePaths) {
+        m_fileQueue.enqueue(filePath);
+        appendLog("Добавлен в очередь: " + QFileInfo(filePath).fileName());
+    }
 
-    appendLog("Выбран файл: " + filePath);
+    // Если перевод не идёт, начинаем обработку очереди
+    if (!m_isTranslating) {
+        processNextFile();
+    }
 }
 
 void MainWindow::onTranslateClicked()
@@ -111,12 +117,13 @@ void MainWindow::onTranslateClicked()
 
     if (!m_parser->parse(m_currentFilePath, text, fmt)) {
         appendLog("Ошибка чтения файла");
+        // Переходим к следующему файлу при ошибке
+        processNextFile();
         return;
     }
 
-    // 🔥 автоопределение языка
+    // Автоопределение языка (оставляем как есть)
     QString lower = text.toLower();
-
     if (lower.contains(QRegularExpression("[a-z]"))) {
         m_sourceLangCombo->setCurrentText("en");
         m_targetLangCombo->setCurrentText("ru");
@@ -139,13 +146,14 @@ void MainWindow::onTranslationFinished(const QString &translatedText, bool succe
     if (!success) {
         appendLog("Ошибка перевода: " + error);
         m_progressBar->setVisible(false);
+        // Переходим к следующему файлу в очереди
+        processNextFile();
         return;
     }
 
     QFileInfo info(m_currentFilePath);
     QString outputPath;
 
-    // 🔥 ГЛАВНОЕ ИСПРАВЛЕНИЕ
     if (info.suffix() == "docx") {
         outputPath = info.path() + "/" + info.completeBaseName() + "_translated.docx";
     }
@@ -159,6 +167,7 @@ void MainWindow::onTranslationFinished(const QString &translatedText, bool succe
     if (!m_parser->build(translatedText, outputPath)) {
         appendLog("Ошибка сохранения");
         m_progressBar->setVisible(false);
+        processNextFile();
         return;
     }
 
@@ -166,10 +175,80 @@ void MainWindow::onTranslationFinished(const QString &translatedText, bool succe
     m_progressBar->setValue(100);
     m_progressBar->setVisible(false);
 
-    QMessageBox::information(this, "Готово", "Файл переведён!");
+    // Показываем уведомление только для последнего файла
+    if (m_fileQueue.isEmpty()) {
+        QMessageBox::information(this, "Готово", "Файл переведён!");
+    } else {
+        appendLog("Файл переведён. Переход к следующему...");
+    }
+
+    // Запускаем следующий файл
+    processNextFile();
 }
 
 void MainWindow::onProgressUpdated(int percent)
 {
     m_progressBar->setValue(percent);
 }
+
+void MainWindow::dragEnterEvent(QDragEnterEvent *event)
+{
+    if (event->mimeData()->hasUrls()) {
+        event->acceptProposedAction();
+    }
+}
+
+void MainWindow::dropEvent(QDropEvent *event)
+{
+    QList<QUrl> urls = event->mimeData()->urls();
+
+    if (urls.isEmpty()) {
+        appendLog("Drag&Drop: не удалось получить файл");
+        return;
+    }
+
+    int addedCount = 0;
+    for (const QUrl &url : urls) {
+        QString filePath = url.toLocalFile();
+
+        if (filePath.endsWith(".docx", Qt::CaseInsensitive) ||
+            filePath.endsWith(".pdf", Qt::CaseInsensitive) ||
+            filePath.endsWith(".txt", Qt::CaseInsensitive)) {
+
+            m_fileQueue.enqueue(filePath);
+            appendLog("Добавлен в очередь (Drag&Drop): " + QFileInfo(filePath).fileName());
+            addedCount++;
+        } else {
+            appendLog("Пропущен (неподдерживаемый формат): " + QFileInfo(filePath).fileName());
+        }
+    }
+
+    if (addedCount > 0 && !m_isTranslating) {
+        processNextFile();
+    }
+}
+
+void MainWindow::processNextFile()
+{
+    if (m_fileQueue.isEmpty()) {
+        m_isTranslating = false;
+        m_progressBar->setVisible(false);
+        appendLog("Все файлы обработаны!");
+        QMessageBox::information(this, "Готово", "Все файлы в очереди переведены!");
+        return;
+    }
+
+    m_isTranslating = true;
+    m_currentFilePath = m_fileQueue.dequeue();
+
+    QString fileName = QFileInfo(m_currentFilePath).fileName();
+    appendLog(QString("=== Обработка файла %1 (осталось в очереди: %2) ===")
+                  .arg(fileName)
+                  .arg(m_fileQueue.size()));
+
+    m_fileLabel->setText(fileName);
+
+    // Запускаем перевод
+    onTranslateClicked();
+}
+
