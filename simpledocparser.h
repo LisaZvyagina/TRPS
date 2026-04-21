@@ -27,9 +27,12 @@ private:
         int tableCols = 0;
         QString fontName;
         int fontSize = 0;
+        QString alignment;
+        double xPos = 0.0;
     };
 
     QList<TextRun> m_runs;
+    double m_pdfLeftMargin = 85.0;  // default ~30mm, refined from actual PDF
 
     bool parseTXT(const QString &filePath, QString &outText);
     bool parseDOCX(const QString &filePath, QString &outText);
