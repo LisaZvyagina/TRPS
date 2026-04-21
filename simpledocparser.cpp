@@ -17,16 +17,16 @@ bool SimpleDocParser::parse(const QString &filePath, QString &outText, QString &
 {
     Q_UNUSED(outFormatInfo);
     m_runs.clear();
-    
+
     if (filePath.endsWith(".txt", Qt::CaseInsensitive))
         return parseTXT(filePath, outText);
-    
+
     if (filePath.endsWith(".docx", Qt::CaseInsensitive))
         return parseDOCX(filePath, outText);
-    
+
     if (filePath.endsWith(".pdf", Qt::CaseInsensitive))
         return parsePDF(filePath, outText);
-    
+
     return false;
 }
 
@@ -35,7 +35,7 @@ bool SimpleDocParser::parseTXT(const QString &filePath, QString &outText)
     QFile file(filePath);
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
         return false;
-    
+
     QTextStream in(&file);
     outText = in.readAll();
     return true;
@@ -44,9 +44,9 @@ bool SimpleDocParser::parseTXT(const QString &filePath, QString &outText)
 bool SimpleDocParser::parseDOCX(const QString &filePath, QString &outText)
 {
     m_runs.clear();
-    
+
     QProcess process;
-    
+
     QString script =
         "import json\n"
         "import docx\n"
@@ -267,29 +267,29 @@ bool SimpleDocParser::parseDOCX(const QString &filePath, QString &outText)
                      "print(json.dumps(blocks_data, ensure_ascii=False))\n"
                      "print('###TEXT###')\n"
                      "print('\\n'.join(texts))\n";
-    
+
     process.start("py", QStringList() << "-3" << "-c" << script);
     process.waitForFinished();
-    
+
     QString output = QString::fromUtf8(process.readAllStandardOutput());
-    
+
     int jsonStart = output.indexOf("###JSON###");
     int textStart = output.indexOf("###TEXT###");
-    
+
     if (jsonStart == -1 || textStart == -1)
         return false;
-    
+
     QString jsonPart = output.mid(jsonStart + 10, textStart - (jsonStart + 10)).trimmed();
     QString textPart = output.mid(textStart + 10).trimmed();
-    
+
     outText = textPart;
-    
+
     QJsonDocument doc = QJsonDocument::fromJson(jsonPart.toUtf8());
     QJsonArray arr = doc.array();
-    
+
     for (auto v : arr) {
         QJsonObject obj = v.toObject();
-        
+
         TextRun r;
         r.text = obj["text"].toString();
         r.bold = obj["bold"].toBool();
@@ -303,56 +303,110 @@ bool SimpleDocParser::parseDOCX(const QString &filePath, QString &outText)
         r.fontSize = obj["fontSize"].toInt();
         r.alignment = obj["alignment"].toString();
         r.xPos = obj["xPos"].toDouble();
-        
+
         m_runs.append(r);
     }
-    
+
     return true;
 }
 
 bool SimpleDocParser::parsePDF(const QString &filePath, QString &outText)
 {
     m_runs.clear();
-    
+
     QProcess process;
-    
+
     QString script =
         "import json\n"
         "import fitz\n"
         "import sys\n"
         "sys.stdout.reconfigure(encoding='utf-8')\n"
         "\n"
-        "def detect_alignment(line, page_width, left_margin=50):\n"
-        "    \"\"\"Определяет выравнивание строки по позиции первого символа.\"\"\"\n"
+        "def calc_page_margins(blocks, page_width):\n"
+        "    \"\"\"Вычисляет реальное левое и правое поле страницы по минимальным x0/x1.\"\"\"\n"
+        "    x0_vals = []\n"
+        "    x1_vals = []\n"
+        "    for b in blocks:\n"
+        "        if 'lines' not in b:\n"
+        "            continue\n"
+        "        for ln in b['lines']:\n"
+        "            for sp in ln['spans']:\n"
+        "                if sp['text'].strip():\n"
+        "                    x0_vals.append(sp['bbox'][0])\n"
+        "                    x1_vals.append(sp['bbox'][2])\n"
+        "    left_margin = min(x0_vals) if x0_vals else 50\n"
+        "    right_margin = page_width - max(x1_vals) if x1_vals else 50\n"
+        "    return left_margin, right_margin\n"
+        "\n"
+        "def detect_alignment(line, page_width, left_margin, right_margin):\n"
         "    x0 = line['bbox'][0]\n"
         "    x1 = line['bbox'][2]\n"
         "    line_width = x1 - x0\n"
+        "    # Порог: строка считается начинающейся у левого поля если отступ <= left_margin + 5pt\n"
+        "    left_threshold = left_margin + 5\n"
+        "    # Правый край страницы с учетом поля\n"
+        "    right_edge = page_width - right_margin\n"
+        "    page_center = page_width / 2\n"
         "    \n"
-        "    # Если строка почти на всю ширину — left\n"
-        "    if line_width > page_width * 0.75:\n"
+        "    # 1. Начинается у левого поля → left (высший приоритет)\n"
+        "    if x0 <= left_threshold:\n"
         "        return 'left'\n"
         "    \n"
-        "    # Если левый край близок к левому полю — left\n"
-        "    if x0 < left_margin + 20:\n"
-        "        return 'left'\n"
-        "    \n"
-        "    # Если правый край близок к правому краю страницы — right\n"
-        "    if page_width - x1 < 30:\n"
+        "    # 2. Правый край прижат к правому полю, а левый далеко от левого → right\n"
+        "    if abs(x1 - right_edge) <= 15 and x0 > left_threshold + 20:\n"
         "        return 'right'\n"
         "    \n"
-        "    # Если левый отступ значительный, но не до правого края — center\n"
-        "    if x0 > left_margin + 50:\n"
+        "    # 3. Строка симметрична относительно центра страницы → center\n"
+        "    line_center = (x0 + x1) / 2\n"
+        "    if abs(line_center - page_center) < page_width * 0.06:\n"
+        "        return 'center'\n"
+        "    \n"
+        "    # 4. Сдвинута вправо, но не по центру и не у правого поля\n"
+        "    if x0 > left_threshold + 50:\n"
         "        return 'center'\n"
         "    \n"
         "    return 'left'\n"
         "\n"
+        "def build_underline_set(page):\n"
+        "    \"\"\"Собирает Y-координаты горизонтальных линий (подчеркивания) на странице.\"\"\"\n"
+        "    underline_ys = []\n"
+        "    try:\n"
+        "        for drawing in page.get_drawings():\n"
+        "            for item in drawing.get('items', []):\n"
+        "                if item[0] == 'l':  # line\n"
+        "                    p1, p2 = item[1], item[2]\n"
+        "                    if abs(p1.y - p2.y) < 2 and abs(p1.x - p2.x) > 5:\n"
+        "                        underline_ys.append((min(p1.x, p2.x), max(p1.x, p2.x), p1.y))\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "    return underline_ys\n"
+        "\n"
+        "def is_underlined(span, underline_ys, tolerance=4):\n"
+        "    \"\"\"Проверяет, есть ли горизонтальная линия сразу под span.\"\"\"\n"
+        "    sx0 = span['bbox'][0]\n"
+        "    sx1 = span['bbox'][2]\n"
+        "    sy1 = span['bbox'][3]  # нижний край спана\n"
+        "    for (lx0, lx1, ly) in underline_ys:\n"
+        "        if abs(ly - sy1) < tolerance:\n"
+        "            overlap = min(sx1, lx1) - max(sx0, lx0)\n"
+        "            if overlap > (sx1 - sx0) * 0.4:\n"
+        "                return True\n"
+        "    return False\n"
+        "\n"
         "doc = fitz.open(r'''" + filePath + "''')\n"
                      "blocks_data = []\n"
                      "texts = []\n"
+                     "global_left_margin = 85.0\n"
+                     "first_page = True\n"
                      "\n"
                      "for page in doc:\n"
                      "    page_width = page.rect.width\n"
+                     "    underline_ys = build_underline_set(page)\n"
                      "    blocks = page.get_text('dict')['blocks']\n"
+                     "    left_margin, right_margin = calc_page_margins(blocks, page_width)\n"
+                     "    if first_page:\n"
+                     "        global_left_margin = left_margin\n"
+                     "        first_page = False\n"
                      "    \n"
                      "    for block in blocks:\n"
                      "        if 'lines' not in block:\n"
@@ -370,7 +424,7 @@ bool SimpleDocParser::parsePDF(const QString &filePath, QString &outText)
                      "                flags = span['flags']\n"
                      "                bold = bool(flags & 2 ** 4)\n"
                      "                italic = bool(flags & 2 ** 1)\n"
-                     "                underline = bool(flags & 2 ** 7)\n"
+                     "                underline = is_underlined(span, underline_ys)\n"
                      "                font = span['font']\n"
                      "                size = span['size']\n"
                      "                \n"
@@ -400,7 +454,8 @@ bool SimpleDocParser::parsePDF(const QString &filePath, QString &outText)
                      "                main_font = max(font_counts, key=font_counts.get) if font_counts else ''\n"
                      "                main_size = max(size_counts, key=size_counts.get) if size_counts else 0\n"
                      "                \n"
-                     "                alignment = detect_alignment(line, page_width)\n"
+                     "                alignment = detect_alignment(line, page_width, left_margin, right_margin)\n"
+                     "                x0_real = line['bbox'][0]\n"
                      "                \n"
                      "                block_data = {\n"
                      "                    'type': 'paragraph',\n"
@@ -413,40 +468,55 @@ bool SimpleDocParser::parsePDF(const QString &filePath, QString &outText)
                      "                    'fontName': main_font,\n"
                      "                    'fontSize': main_size,\n"
                      "                    'alignment': alignment,\n"
-                     "                    'xPos': 0\n"
+                     "                    'xPos': x0_real\n"
                      "                }\n"
                      "                blocks_data.append(block_data)\n"
                      "                texts.append(full_text)\n"
                      "\n"
                      "doc.close()\n"
                      "\n"
+                     "actual_left_margin = global_left_margin\n"
+                     "\n"
                      "print('###JSON###')\n"
                      "print(json.dumps(blocks_data, ensure_ascii=False))\n"
+                     "print('###MARGIN###')\n"
+                     "print(actual_left_margin)\n"
                      "print('###TEXT###')\n"
                      "print('\\n'.join(texts))\n";
-    
+
     process.start("py", QStringList() << "-3" << "-c" << script);
     process.waitForFinished();
-    
+
     QString output = QString::fromUtf8(process.readAllStandardOutput());
-    
-    int jsonStart = output.indexOf("###JSON###");
-    int textStart = output.indexOf("###TEXT###");
-    
+
+    int jsonStart  = output.indexOf("###JSON###");
+    int marginStart = output.indexOf("###MARGIN###");
+    int textStart  = output.indexOf("###TEXT###");
+
     if (jsonStart == -1 || textStart == -1)
         return false;
-    
-    QString jsonPart = output.mid(jsonStart + 10, textStart - (jsonStart + 10)).trimmed();
+
+    int jsonEnd = (marginStart != -1) ? marginStart : textStart;
+    QString jsonPart = output.mid(jsonStart + 10, jsonEnd - (jsonStart + 10)).trimmed();
+
+    if (marginStart != -1) {
+        QString marginPart = output.mid(marginStart + 12, textStart - (marginStart + 12)).trimmed();
+        bool ok = false;
+        double margin = marginPart.toDouble(&ok);
+        if (ok && margin > 10.0)
+            m_pdfLeftMargin = margin;
+    }
+
     QString textPart = output.mid(textStart + 10).trimmed();
-    
+
     outText = textPart;
-    
+
     QJsonDocument doc = QJsonDocument::fromJson(jsonPart.toUtf8());
     QJsonArray arr = doc.array();
-    
+
     for (auto v : arr) {
         QJsonObject obj = v.toObject();
-        
+
         TextRun r;
         r.text = obj["text"].toString();
         r.bold = obj["bold"].toBool();
@@ -460,20 +530,21 @@ bool SimpleDocParser::parsePDF(const QString &filePath, QString &outText)
         r.fontSize = obj["fontSize"].toInt();
         r.alignment = obj["alignment"].toString();
         r.xPos = obj["xPos"].toDouble();
-        
+
         m_runs.append(r);
     }
-    
+
     return true;
 }
+
 bool SimpleDocParser::build(const QString &text, const QString &path)
 {
     if (path.endsWith(".docx"))
         return buildDOCX(text, path);
-    
+
     if (path.endsWith(".pdf"))
         return buildPDF(text, path);
-    
+
     return buildTXT(text, path);
 }
 
@@ -482,7 +553,7 @@ bool SimpleDocParser::buildTXT(const QString &text, const QString &path)
     QFile file(path);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
         return false;
-    
+
     QTextStream out(&file);
     out << text;
     return true;
@@ -493,25 +564,25 @@ bool SimpleDocParser::buildDOCX(const QString &translatedText, const QString &pa
     QString normalizedText = translatedText;
     normalizedText.replace("\r\n", "\n");
     normalizedText.replace("\r", "\n");
-    
+
     while (normalizedText.contains("\n\n")) {
         normalizedText.replace("\n\n", "\n");
     }
-    
+
     QStringList lines = normalizedText.split("\n", Qt::KeepEmptyParts);
-    
+
     while (!lines.isEmpty() && lines.first().isEmpty()) {
         lines.removeFirst();
     }
     while (!lines.isEmpty() && lines.last().isEmpty()) {
         lines.removeLast();
     }
-    
+
     qDebug() << "translatedLines:" << lines.size() << "m_runs:" << m_runs.size();
-    
+
     QStringList textLines;
     QStringList tableLines;
-    
+
     for (const QString &line : lines) {
         if (line.contains(" | ")) {
             tableLines.append(line);
@@ -519,26 +590,26 @@ bool SimpleDocParser::buildDOCX(const QString &translatedText, const QString &pa
             textLines.append(line);
         }
     }
-    
+
     qDebug() << "Text lines:" << textLines.size() << "Table lines:" << tableLines.size();
-    
+
     int textRunsCount = 0;
     for (const auto &run : m_runs) {
         if (!run.isTable) textRunsCount++;
     }
-    
+
     qDebug() << "Text runs count:" << textRunsCount;
-    
+
     QStringList distributedText;
     if (textLines.size() == textRunsCount) {
         distributedText = textLines;
     } else if (textLines.size() > 0 && textRunsCount > 0) {
         QString fullText = textLines.join(" ");
         QStringList words = fullText.split(" ", Qt::SkipEmptyParts);
-        
+
         int wordsPerRun = words.size() / textRunsCount;
         int remainder = words.size() % textRunsCount;
-        
+
         int wordIdx = 0;
         for (int i = 0; i < textRunsCount; ++i) {
             int count = wordsPerRun + (i < remainder ? 1 : 0);
@@ -549,33 +620,33 @@ bool SimpleDocParser::buildDOCX(const QString &translatedText, const QString &pa
             distributedText.append(runWords.join(" "));
         }
     }
-    
+
     QJsonArray arr;
     int textIdx = 0;
     int tableIdx = 0;
-    
+
     for (const auto &run : m_runs) {
         if (run.isTable) {
             QJsonObject obj;
             obj["isTable"] = true;
             obj["tableCols"] = run.tableCols;
-            
+
             QJsonDocument tableDoc = QJsonDocument::fromJson(run.text.toUtf8());
             QJsonArray origTableData = tableDoc.array();
-            
+
             QJsonArray translatedTableData;
             int rowsNeeded = origTableData.size();
-            
+
             for (int r = 0; r < rowsNeeded && tableIdx < tableLines.size(); ++r) {
                 QString line = tableLines[tableIdx++];
                 QStringList cells = line.split("|", Qt::SkipEmptyParts);
-                
+
                 QJsonArray rowArray;
                 int cellIdx = 0;
                 for (const QString &cell : cells) {
                     QJsonObject cellObj;
                     cellObj["text"] = cell.trimmed();
-                    
+
                     if (r < origTableData.size()) {
                         QJsonArray origRow = origTableData[r].toArray();
                         if (cellIdx < origRow.size()) {
@@ -588,22 +659,22 @@ bool SimpleDocParser::buildDOCX(const QString &translatedText, const QString &pa
                             cellObj["alignment"] = origCell["alignment"].toString();
                         }
                     }
-                    
+
                     rowArray.append(cellObj);
                     cellIdx++;
                 }
                 translatedTableData.append(rowArray);
             }
-            
+
             obj["tableData"] = translatedTableData;
             arr.append(obj);
         } else {
             QString cleanText = (textIdx < distributedText.size())
             ? distributedText[textIdx++]
             : run.text;
-            
+
             cleanText = cleanText.simplified();
-            
+
             QJsonObject obj;
             obj["text"] = cleanText;
             obj["bold"] = run.bold;
@@ -619,17 +690,17 @@ bool SimpleDocParser::buildDOCX(const QString &translatedText, const QString &pa
             arr.append(obj);
         }
     }
-    
+
     QJsonDocument doc(arr);
     QString json = QString::fromUtf8(doc.toJson(QJsonDocument::Compact));
     json.replace("\\", "\\\\");
     json.replace("'''", " ");
-    
+
     QString safePath = path;
     safePath.replace("\\", "\\\\");
-    
+
     QProcess process;
-    
+
     QString script =
         "import json\n"
         "from docx import Document\n"
@@ -727,16 +798,16 @@ bool SimpleDocParser::buildDOCX(const QString &translatedText, const QString &pa
                  "\n"
                  "doc.save(r'''" + safePath + "''')\n"
                      "print('OK')\n";
-    
+
     process.start("py", QStringList() << "-3" << "-c" << script);
     process.waitForFinished();
-    
+
     QString error = QString::fromUtf8(process.readAllStandardError());
     if (!error.isEmpty()) {
         qDebug() << "Python error:" << error;
         return false;
     }
-    
+
     return true;
 }
 
@@ -745,23 +816,23 @@ bool SimpleDocParser::buildPDF(const QString &text, const QString &path)
     QString normalizedText = text;
     normalizedText.replace("\r\n", "\n");
     normalizedText.replace("\r", "\n");
-    
+
     while (normalizedText.contains("\n\n")) {
         normalizedText.replace("\n\n", "\n");
     }
-    
+
     QStringList lines = normalizedText.split("\n", Qt::KeepEmptyParts);
-    
+
     while (!lines.isEmpty() && lines.first().isEmpty()) {
         lines.removeFirst();
     }
     while (!lines.isEmpty() && lines.last().isEmpty()) {
         lines.removeLast();
     }
-    
+
     QStringList textLines;
     QStringList tableLines;
-    
+
     for (const QString &line : lines) {
         if (line.contains(" | ")) {
             tableLines.append(line);
@@ -769,22 +840,22 @@ bool SimpleDocParser::buildPDF(const QString &text, const QString &path)
             textLines.append(line);
         }
     }
-    
+
     int textRunsCount = 0;
     for (const auto &run : m_runs) {
         if (!run.isTable) textRunsCount++;
     }
-    
+
     QStringList distributedText;
     if (textLines.size() == textRunsCount) {
         distributedText = textLines;
     } else if (textLines.size() > 0 && textRunsCount > 0) {
         QString fullText = textLines.join(" ");
         QStringList words = fullText.split(" ", Qt::SkipEmptyParts);
-        
+
         int wordsPerRun = words.size() / textRunsCount;
         int remainder = words.size() % textRunsCount;
-        
+
         int wordIdx = 0;
         for (int i = 0; i < textRunsCount; ++i) {
             int count = wordsPerRun + (i < remainder ? 1 : 0);
@@ -795,33 +866,33 @@ bool SimpleDocParser::buildPDF(const QString &text, const QString &path)
             distributedText.append(runWords.join(" "));
         }
     }
-    
+
     QJsonArray arr;
     int textIdx = 0;
     int tableIdx = 0;
-    
+
     for (const auto &run : m_runs) {
         if (run.isTable) {
             QJsonObject obj;
             obj["isTable"] = true;
             obj["tableCols"] = run.tableCols;
-            
+
             QJsonDocument tableDoc = QJsonDocument::fromJson(run.text.toUtf8());
             QJsonArray origTableData = tableDoc.array();
-            
+
             QJsonArray translatedTableData;
             int rowsNeeded = origTableData.size();
-            
+
             for (int r = 0; r < rowsNeeded && tableIdx < tableLines.size(); ++r) {
                 QString line = tableLines[tableIdx++];
                 QStringList cells = line.split("|", Qt::SkipEmptyParts);
-                
+
                 QJsonArray rowArray;
                 int cellIdx = 0;
                 for (const QString &cell : cells) {
                     QJsonObject cellObj;
                     cellObj["text"] = cell.trimmed();
-                    
+
                     if (r < origTableData.size()) {
                         QJsonArray origRow = origTableData[r].toArray();
                         if (cellIdx < origRow.size()) {
@@ -834,22 +905,22 @@ bool SimpleDocParser::buildPDF(const QString &text, const QString &path)
                             cellObj["alignment"] = origCell["alignment"].toString();
                         }
                     }
-                    
+
                     rowArray.append(cellObj);
                     cellIdx++;
                 }
                 translatedTableData.append(rowArray);
             }
-            
+
             obj["tableData"] = translatedTableData;
             arr.append(obj);
         } else {
             QString cleanText = (textIdx < distributedText.size())
             ? distributedText[textIdx++]
             : run.text;
-            
+
             cleanText = cleanText.simplified();
-            
+
             QJsonObject obj;
             obj["text"] = cleanText;
             obj["bold"] = run.bold;
@@ -865,17 +936,17 @@ bool SimpleDocParser::buildPDF(const QString &text, const QString &path)
             arr.append(obj);
         }
     }
-    
+
     QJsonDocument doc(arr);
     QString json = QString::fromUtf8(doc.toJson(QJsonDocument::Compact));
     json.replace("\\", "\\\\");
     json.replace("'''", " ");
-    
+
     QString safePath = path;
     safePath.replace("\\", "\\\\");
-    
+
     QProcess process;
-    
+
     QString script =
         "import json\n"
         "from fpdf import FPDF\n"
@@ -892,10 +963,12 @@ bool SimpleDocParser::buildPDF(const QString &text, const QString &path)
         "            pass\n"
         "\n"
         "    pdf = PDF()\n"
-        "    pdf.set_auto_page_break(auto=True, margin=15)\n"
-        "    pdf.add_page()\n"
-        "\n"
-        "    data = json.loads(r'''" + json + "''')\n"
+        "    pdf.set_margins(left=" + QString::number(m_pdfLeftMargin / 2.835, 'f', 1) +
+        ", top=25, right=" + QString::number(m_pdfLeftMargin / 2.835 * 0.9, 'f', 1) + ")\n"
+                                                                                      "    pdf.set_auto_page_break(auto=True, margin=20)\n"
+                                                                                      "    pdf.add_page()\n"
+                                                                                      "\n"
+                                                                                      "    data = json.loads(r'''" + json + "''')\n"
                  "\n"
                  "    for item in data:\n"
                  "        is_table = item.get('isTable', False)\n"
@@ -1017,29 +1090,18 @@ bool SimpleDocParser::buildPDF(const QString &text, const QString &path)
                  "            \n"
                  "            text_width = pdf.get_string_width(text)\n"
                  "            page_width = pdf.w - pdf.l_margin - pdf.r_margin\n"
+                 "            line_h = font_size * 0.35 + 2\n"
                  "            \n"
-                 "            # Выравнивание через сохраненную позицию X или через alignment\n"
-                 "            if x_pos > 0 and alignment != 'center':\n"
-                 "                # Используем оригинальную позицию X из PDF\n"
-                 "                pdf.set_x(x_pos)\n"
-                 "                pdf.cell(text_width, font_size * 0.5, text, ln=True)\n"
-                 "            elif alignment == 'center':\n"
-                 "                x_offset = (page_width - text_width) / 2\n"
-                 "                if x_offset < 0:\n"
-                 "                    x_offset = 0\n"
-                 "                pdf.set_x(pdf.l_margin + x_offset)\n"
-                 "                pdf.cell(text_width, font_size * 0.5, text, ln=True)\n"
+                 "            if alignment == 'center':\n"
+                 "                pdf.multi_cell(0, line_h, text, align='C')\n"
                  "            elif alignment == 'right':\n"
-                 "                x_offset = page_width - text_width\n"
-                 "                if x_offset < 0:\n"
-                 "                    x_offset = 0\n"
-                 "                pdf.set_x(pdf.l_margin + x_offset)\n"
-                 "                pdf.cell(text_width, font_size * 0.5, text, ln=True)\n"
+                 "                pdf.multi_cell(0, line_h, text, align='R')\n"
+                 "            elif alignment == 'justify':\n"
+                 "                pdf.multi_cell(0, line_h, text, align='J')\n"
                  "            else:\n"
-                 "                # Левое выравнивание — просто cell\n"
-                 "                pdf.cell(0, font_size * 0.5, text, ln=True)\n"
+                 "                pdf.multi_cell(0, line_h, text, align='L')\n"
                  "            \n"
-                 "            pdf.ln(font_size * 0.2)\n"
+                 "            pdf.ln(font_size * 0.15)\n"
                  "            \n"
                  "            if pdf.get_y() > pdf.h - 30:\n"
                  "                pdf.add_page()\n"
@@ -1050,31 +1112,31 @@ bool SimpleDocParser::buildPDF(const QString &text, const QString &path)
                      "    print('ERROR: ' + str(e), file=sys.stderr)\n"
                      "    traceback.print_exc(file=sys.stderr)\n"
                      "    sys.exit(1)\n";
-    
+
     process.start("py", QStringList() << "-3" << "-c" << script);
-    
+
     if (!process.waitForFinished(60000)) {
         qDebug() << "PDF build timeout or crash";
         return false;
     }
-    
+
     int exitCode = process.exitCode();
     QString stdOut = QString::fromUtf8(process.readAllStandardOutput()).trimmed();
     QString stdErr = QString::fromUtf8(process.readAllStandardError()).trimmed();
-    
+
     qDebug() << "PDF build exit code:" << exitCode;
     qDebug() << "PDF build stdout:" << stdOut;
     qDebug() << "PDF build stderr:" << stdErr;
-    
+
     if (exitCode != 0) {
         qDebug() << "PDF build failed with exit code:" << exitCode;
         return false;
     }
-    
+
     if (!stdOut.contains("OK")) {
         qDebug() << "PDF build did not return OK, stdout:" << stdOut;
         return false;
     }
-    
+
     return true;
 }
