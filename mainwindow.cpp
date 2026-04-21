@@ -17,7 +17,7 @@ MainWindow::MainWindow(QWidget *parent)
     m_translator(new SimpleTranslator(this))
 {
     setupUI();
-
+    setAcceptDrops(true);
     appendLog("Приложение запущено.");
 
     connect(m_translator, &SimpleTranslator::translationFinished,
@@ -173,3 +173,36 @@ void MainWindow::onProgressUpdated(int percent)
 {
     m_progressBar->setValue(percent);
 }
+
+void MainWindow::dragEnterEvent(QDragEnterEvent *event)
+{
+    if (event->mimeData()->hasUrls()) {
+        event->acceptProposedAction();
+    }
+}
+
+void MainWindow::dropEvent(QDropEvent *event)
+{
+    QList<QUrl> urls = event->mimeData()->urls();
+
+    if (urls.isEmpty()) {
+        appendLog("Drag&Drop: не удалось получить файл");
+        return;
+    }
+
+    QString filePath = urls.first().toLocalFile();
+
+    if (filePath.endsWith(".docx", Qt::CaseInsensitive) ||
+        filePath.endsWith(".pdf", Qt::CaseInsensitive) ||
+        filePath.endsWith(".txt", Qt::CaseInsensitive)) {
+
+        m_currentFilePath = filePath;
+        m_fileLabel->setText(QFileInfo(filePath).fileName());
+        m_translateBtn->setEnabled(true);
+
+        appendLog("Файл добавлен через Drag&Drop: " + filePath);
+    } else {
+        appendLog("Drag&Drop: неподдерживаемый формат файла");
+    }
+}
+
